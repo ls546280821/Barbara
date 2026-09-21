@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>Barbara</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ================= 左侧边栏 ================= -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">♪ Barbara</span>
+        <button id="btn-theme" class="icon-btn brand-theme" type="button" title="切换为夜间模式" aria-label="切换为夜间模式" aria-pressed="false">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+          </svg>
+        </button>
+      </div>
+
+      <button id="btn-new" class="btn btn-primary btn-block" aria-label="创建新对话">＋ 新对话</button>
+
+      <div class="sidebar-label">历史会话</div>
+      <div id="convo-list" class="convo-list" role="list"></div>
+
+      <div class="sidebar-foot">
+        <button id="btn-chars" class="btn btn-ghost btn-block" aria-label="打开角色库">角色库</button>
+        <button id="btn-settings" class="btn btn-ghost btn-block" aria-label="打开设置">设置</button>
+        <button id="btn-folder" class="btn btn-ghost btn-block" aria-label="打开数据文件夹">打开数据文件夹</button>
+      </div>
+    </aside>
+
+    <!-- ================= 主对话区 ================= -->
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1 id="convo-title">新对话</h1>
+          <p id="convo-meta" class="meta">未配置</p>
+        </div>
+        <div class="topbar-actions">
+          <select id="character-switch" class="model-switch char-switch" title="切换当前会话扮演的角色" aria-label="切换角色"></select>
+          <select id="model-switch" class="model-switch" title="切换当前会话使用的模型" aria-label="切换模型"></select>
+          <button id="btn-copy-all" class="btn btn-ghost btn-sm" aria-label="复制整段对话">复制全文</button>
+          <button id="btn-clear" class="btn btn-ghost btn-sm" aria-label="清空当前对话">清空对话</button>
+          <button id="btn-stop" class="btn btn-danger btn-sm hidden" aria-label="停止生成回复">停止生成</button>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></section>
+
+      <footer class="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="说点什么……（Shift + Enter 换行）" aria-label="输入消息"></textarea>
+          <button id="btn-send" class="btn btn-primary btn-send" aria-label="发送消息">发送</button>
+        </div>
+        <div class="composer-hint">
+          <span id="hint-text">Enter 发送 · Shift + Enter 换行</span>
+          <span id="usage-text"></span>
+        </div>
+      </footer>
+
+      <!-- 提示条放在主区域内：这样它居中于对话区，而不是整个窗口 -->
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+    </main>
+  </div>
+
+  <!-- ================= 设置弹窗 ================= -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="settings-title">设置</h2>
+          <p class="modal-sub">配置模型接口与对话行为</p>
+        </div>
+        <button id="btn-close-settings" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body">
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5" />
+                <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">模型服务</div>
+              <div class="panel-desc">可以添加多个服务商，随时切换</div>
+            </div>
+          </div>
+
+          <!-- 服务商切换标签 -->
+          <div id="provider-tabs" class="provider-tabs" role="tablist" aria-label="服务商"></div>
+
+          <div class="provider-add">
+            <button id="btn-add-provider" class="btn btn-ghost btn-sm" type="button" aria-expanded="false">＋ 添加服务商</button>
+          </div>
+          <div id="provider-presets" class="provider-presets hidden"></div>
+
+          <label class="field">
+            <span class="field-label">名称</span>
+            <input id="p-name" type="text" spellcheck="false" placeholder="例如 DeepSeek" aria-label="服务商名称" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">接口地址</span>
+            <input id="p-baseurl" type="text" spellcheck="false" placeholder="https://api.deepseek.com" aria-label="接口地址" />
+            <span class="field-help">DeepSeek 填 https://api.deepseek.com；OpenAI 填 https://api.openai.com/v1。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">API Key</span>
+            <input id="p-apikey" type="password" spellcheck="false" placeholder="sk-..." aria-label="API Key" />
+            <span class="field-help">只保存在你自己电脑上，保存时会加密。</span>
+          </label>
+
+          <div class="field field-stack">
+            <div class="field-row">
+              <span class="field-label">可用模型</span>
+              <button id="btn-fetch-models" class="btn btn-ghost btn-sm" type="button" aria-label="从接口拉取模型列表">拉取可用模型</button>
+            </div>
+            <textarea id="p-models" rows="4" spellcheck="false" aria-label="模型列表" placeholder="一行一个模型名，例如：&#10;deepseek-chat&#10;deepseek-reasoner"></textarea>
+            <span class="field-help">一行一个模型。聊天窗口右上角的下拉框里可以随时切换。</span>
+          </div>
+
+          <div class="provider-actions">
+            <button id="btn-del-provider" class="btn btn-danger btn-sm" type="button">删除这个服务商</button>
+            <button id="btn-test" class="btn btn-ghost btn-sm" type="button">测试当前服务商</button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">生成参数</div>
+              <div class="panel-desc">控制回答的随机程度和长度</div>
+            </div>
+          </div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span class="field-label">温度</span>
+              <input id="s-temp" type="number" min="0" max="2" step="0.1" />
+              <span class="field-help">越大越有创意，越小越稳定。0.7 通用。</span>
+            </label>
+            <label class="field">
+              <span class="field-label">回复上限</span>
+              <input id="s-maxtokens" type="number" min="64" max="32000" step="64" />
+              <span class="field-help">数字越大回复越长，也越费钱。</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">人设</div>
+              <div class="panel-desc">决定 AI 的性格和说话方式</div>
+            </div>
+          </div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span class="field-label">你的名字</span>
+              <input id="s-username" type="text" spellcheck="false" placeholder="你" aria-label="你的名字" />
+              <span class="field-help">角色卡里的 <code>{{user}}</code> 会替换成它</span>
+            </label>
+            <label class="field">
+              <span class="field-label">带入轮数</span>
+              <input id="s-maxturns" type="number" min="1" max="200" step="1" aria-label="上下文轮数" />
+              <span class="field-help">每次发给模型的历史轮数，越大越记得久也越费钱</span>
+            </label>
+          </div>
+
+          <label class="field field-stack">
+            <span class="field-label">系统提示词</span>
+            <textarea id="s-system" rows="5" placeholder="你是……"></textarea>
+            <span class="field-help">
+              这一段决定了 AI 的性格和回答方式，可以随时改。<br />
+              绑定了角色卡的会话<b>不会</b>使用这里的内容，改用角色卡自己的设定。
+            </span>
+          </label>
+        </section>
+
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="6" width="22" height="12" rx="6" />
+                <circle cx="16" cy="12" r="3" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">行为</div>
+              <div class="panel-desc">键盘习惯与上下文补充</div>
+            </div>
+          </div>
+
+          <label class="check">
+            <input id="s-sendonenter" type="checkbox" />
+            <span class="check-text">
+              <span class="check-title">Enter 直接发送</span>
+              <span class="check-desc">不勾选则 Enter 换行，改用 Ctrl + Enter 发送</span>
+            </span>
+          </label>
+
+          <label class="check">
+            <input id="s-showdate" type="checkbox" />
+            <span class="check-text">
+              <span class="check-title">把当前日期告诉 AI</span>
+              <span class="check-desc">模型本身不知道今天是几号，勾选后会注入当天日期</span>
+            </span>
+          </label>
+
+          <label class="check">
+            <input id="s-showusage" type="checkbox" />
+            <span class="check-text">
+              <span class="check-title">显示 token 使用量</span>
+              <span class="check-desc">在输入框右下角显示本次对话消耗的 token 数</span>
+            </span>
+          </label>
+        </section>
+      </div>
+
+      <footer class="modal-foot">
+        <span class="foot-hint">设置只保存在本机，改完记得点保存</span>
+        <div class="foot-actions">
+          <button id="btn-save-settings" class="btn btn-primary" type="button" aria-label="保存设置">保存</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 角色库弹窗 ================= -->
+  <div id="chars-modal" class="modal hidden">
+    <div class="modal-card chars-card" role="dialog" aria-modal="true" aria-labelledby="chars-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="chars-title">角色库</h2>
+          <p class="modal-sub">导入酒馆角色卡，或自己写一个；然后在窗口顶部一键切换</p>
+        </div>
+        <button id="btn-close-chars" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭角色库">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body chars-body">
+        <!-- 左：角色列表 -->
+        <aside class="char-side">
+          <div class="char-side-actions">
+            <button id="btn-import-card" class="btn btn-primary btn-sm" type="button">导入角色卡</button>
+            <button id="btn-new-char" class="btn btn-ghost btn-sm" type="button">新建</button>
+          </div>
+          <div id="char-list" class="char-list" role="list"></div>
+        </aside>
+
+        <!-- 右：角色编辑 -->
+        <section class="char-main">
+          <div id="char-empty" class="char-empty">
+            <div class="char-empty-title">还没有选中角色</div>
+            <p class="char-empty-hint">
+              点「导入角色卡」选一张酒馆的 PNG 卡（或 JSON），<br />
+              也可以点「新建」自己写一个。
+            </p>
+          </div>
+
+          <div id="char-form" class="char-form hidden">
+            <div class="char-head-row">
+              <div class="char-avatar-col">
+                <button id="char-avatar" class="char-avatar" type="button" title="点击更换头像" aria-label="更换头像">
+                  <span class="char-avatar-empty">点击上传</span>
+                </button>
+                <button id="btn-clear-avatar" class="btn btn-ghost btn-sm hidden" type="button">清除头像</button>
+              </div>
+              <div class="char-head-fields">
+                <label class="field">
+                  <span class="field-label">角色名</span>
+                  <input id="c-name" type="text" spellcheck="false" placeholder="例如 芭芭拉" aria-label="角色名" />
+                </label>
+                <label class="field">
+                  <span class="field-label">标签</span>
+                  <input id="c-tags" type="text" spellcheck="false" placeholder="逗号分隔，例如：原神, 治愈" aria-label="标签" />
+                </label>
+              </div>
+            </div>
+
+            <label class="field field-stack">
+              <span class="field-label">角色描述</span>
+              <textarea id="c-desc" rows="5" spellcheck="false" placeholder="这个角色是谁、长什么样、有什么经历……&#10;可以用 {{char}} 表示角色自己，{{user}} 表示你。"></textarea>
+            </label>
+
+            <div class="field-grid">
+              <label class="field field-stack">
+                <span class="field-label">性格</span>
+                <textarea id="c-personality" rows="3" spellcheck="false" placeholder="开朗、爱笑、有点冒失……"></textarea>
+              </label>
+              <label class="field field-stack">
+                <span class="field-label">场景</span>
+                <textarea id="c-scenario" rows="3" spellcheck="false" placeholder="你们正在哪里、干什么"></textarea>
+              </label>
+            </div>
+
+            <label class="field field-stack">
+              <span class="field-label">开场白</span>
+              <textarea id="c-first" rows="3" spellcheck="false" placeholder="第一句话。绑定角色时如果对话还是空的，会自动作为角色的开场消息插入。"></textarea>
+            </label>
+
+            <label class="field field-stack">
+              <span class="field-label">示例对话</span>
+              <textarea id="c-example" rows="4" spellcheck="false" placeholder="{{user}}: 你好&#10;{{char}}: 你好呀～今天感觉怎么样？"></textarea>
+              <span class="field-help">
+                照这个格式写几组，能明显提升扮演时的语气准确度。<br />
+                每行以 <code>{{user}}:</code> 或 <code>{{char}}:</code> 开头，用 <code>&lt;START&gt;</code> 分隔不同组。
+              </span>
+            </label>
+
+            <details class="char-advanced">
+              <summary>高级选项（可以不管）</summary>
+
+              <label class="field field-stack">
+                <span class="field-label">角色专属系统提示词</span>
+                <textarea id="c-system" rows="3" spellcheck="false" placeholder="留空则使用通用扮演规则"></textarea>
+                <span class="field-help">填了会用它取代「设置」里的全局人设。</span>
+              </label>
+
+              <label class="field field-stack">
+                <span class="field-label">对话后指令</span>
+                <textarea id="c-post" rows="2" spellcheck="false" placeholder="放在整段对话最后，用来强调格式或语气要求"></textarea>
+              </label>
+
+              <label class="field field-stack">
+                <span class="field-label">作者备注</span>
+                <textarea id="c-notes" rows="2" spellcheck="false" placeholder="只给你自己看，不会发给模型"></textarea>
+              </label>
+            </details>
+          </div>
+        </section>
+      </div>
+
+      <footer class="modal-foot">
+        <span id="char-foot-hint" class="foot-hint">角色卡只保存在你自己电脑上</span>
+        <div class="foot-actions">
+          <button id="btn-del-char" class="btn btn-danger" type="button">删除角色</button>
+          <button id="btn-save-char" class="btn btn-primary" type="button">保存角色</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 通用确认弹窗 ================= -->
+  <div id="confirm-modal" class="modal hidden">
+    <div class="modal-card confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <div class="confirm-body">
+        <h3 id="confirm-title">确认</h3>
+        <p id="confirm-message"></p>
+      </div>
+      <div class="confirm-foot">
+        <button id="confirm-cancel" class="btn btn-ghost" type="button">取消</button>
+        <button id="confirm-ok" class="btn btn-primary" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
