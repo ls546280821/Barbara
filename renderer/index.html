@@ -32,6 +32,7 @@
 
       <div class="sidebar-foot">
         <button id="btn-chars" class="btn btn-ghost btn-block" aria-label="打开角色库">角色库</button>
+        <button id="btn-worldbooks" class="btn btn-ghost btn-block" aria-label="打开世界书">世界书</button>
         <button id="btn-settings" class="btn btn-ghost btn-block" aria-label="打开设置">设置</button>
         <button id="btn-folder" class="btn btn-ghost btn-block" aria-label="打开数据文件夹">打开数据文件夹</button>
       </div>
@@ -358,6 +359,19 @@
                 <textarea id="c-notes" rows="2" spellcheck="false" placeholder="只给你自己看，不会发给模型"></textarea>
               </label>
             </details>
+
+            <!-- 世界书绑定：角色卡里内嵌的世界书会自动绑定并出现在这里 -->
+            <div class="char-worldbook">
+              <div class="char-worldbook-head">
+                <span class="field-label">世界书</span>
+                <button id="btn-open-worldbooks" class="btn btn-ghost btn-sm" type="button">打开世界书编辑器</button>
+              </div>
+              <div id="char-worldbook-list" class="char-worldbook-list"></div>
+              <p class="field-help">
+                勾选即绑定：只有勾上的世界书在这个角色身上生效。关键词出现在近期对话里才会注入。<br />
+                导入酒馆角色卡时，卡里内嵌的世界书会自动勾上。
+              </p>
+            </div>
           </div>
         </section>
       </div>
@@ -367,6 +381,142 @@
         <div class="foot-actions">
           <button id="btn-del-char" class="btn btn-danger" type="button">删除角色</button>
           <button id="btn-save-char" class="btn btn-primary" type="button">保存角色</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 世界书弹窗 ================= -->
+  <div id="worldbooks-modal" class="modal hidden">
+    <div class="modal-card worldbook-card" role="dialog" aria-modal="true" aria-labelledby="worldbooks-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="worldbooks-title">世界书</h2>
+          <p class="modal-sub">一条条目 = 一组关键词 + 一段设定；关键词命中才会注入提示词</p>
+        </div>
+        <button id="btn-close-worldbooks" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭世界书">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body worldbook-body">
+        <!-- 左：世界书列表 -->
+        <aside class="wb-side">
+          <div class="wb-side-actions">
+            <button id="btn-import-lorebook" class="btn btn-primary btn-sm" type="button">导入世界书</button>
+            <button id="btn-new-worldbook" class="btn btn-ghost btn-sm" type="button">新建</button>
+          </div>
+          <div id="wb-list" class="wb-list"></div>
+        </aside>
+
+        <!-- 中：条目列表 -->
+        <section class="wb-entries">
+          <div id="wb-entries-empty" class="wb-empty">左边选一本书，或新建一本</div>
+          <div id="wb-entries-wrap" class="wb-entries-wrap hidden">
+            <div class="wb-entries-head">
+              <div class="wb-entries-title">
+                <input id="wb-name" type="text" spellcheck="false" placeholder="世界书名称" aria-label="世界书名称" />
+                <div id="wb-entry-count" class="wb-count"></div>
+              </div>
+              <div class="wb-entries-actions">
+                <button id="btn-preview-wb" class="btn btn-ghost btn-sm" type="button">预览命中</button>
+                <button id="btn-new-entry" class="btn btn-ghost btn-sm" type="button">＋ 条目</button>
+                <button id="btn-bind-worldbook-3" class="btn btn-ghost btn-sm" type="button">绑定到会话</button>
+                <button id="btn-bind-worldbook-2" class="btn btn-ghost btn-sm" type="button">绑定到角色</button>
+                <button id="btn-del-worldbook" class="btn btn-danger btn-sm" type="button">删除本书</button>
+              </div>
+            </div>
+            <div id="wb-entry-list" class="wb-entry-list"></div>
+          </div>
+        </section>
+
+        <!-- 右：条目编辑 -->
+        <section class="wb-main">
+          <div id="wb-form-empty" class="wb-empty">选中一条条目后在这里编辑</div>
+
+          <div id="wb-form" class="wb-form hidden">
+            <label class="field field-stack">
+              <span class="field-label">条目名称</span>
+              <input id="wb-e-title" type="text" spellcheck="false" placeholder="例如：小镇广场" />
+            </label>
+
+            <label class="field field-stack">
+              <span class="field-label">关键词</span>
+              <input id="wb-e-keys" type="text" spellcheck="false" placeholder="逗号分隔，例如：广场, 喷泉, 告示牌" />
+              <span class="field-help">
+                对话里出现任意一个就注入。中文按子串匹配，英文按单词匹配。<br />
+                写成 <code>/正则/</code> 也可以。勾选「常驻」则不需要关键词。
+              </span>
+            </label>
+
+            <label class="field field-stack">
+              <span class="field-label">内容</span>
+              <textarea id="wb-e-content" rows="12" spellcheck="false" placeholder="关键词命中时要塞给模型的设定。写成一个能独立看懂的段落。"></textarea>
+            </label>
+
+            <!-- 次要字段折起来，把高度让给「内容」这个真正要长时间写的框 -->
+            <details class="wb-advanced">
+              <summary>更多选项（插入顺序、概率、附加条件）</summary>
+
+              <div class="field-grid">
+                <label class="field field-stack">
+                  <span class="field-label">插入顺序</span>
+                  <input id="wb-e-order" type="number" min="0" max="9999" step="1" value="100" />
+                  <span class="field-help">数字大的更靠后，影响更大。</span>
+                </label>
+                <label class="field field-stack">
+                  <span class="field-label">触发概率 %</span>
+                  <input id="wb-e-prob" type="number" min="0" max="100" step="1" value="100" />
+                  <span class="field-help">100 = 必中。调低可做随机事件。</span>
+                </label>
+              </div>
+
+              <label class="field field-stack">
+                <span class="field-label">附加关键词（可选）</span>
+                <input id="wb-e-keys2" type="text" spellcheck="false" placeholder="留空则忽略" />
+              </label>
+
+              <label class="field">
+                <span class="field-label">附加条件</span>
+                <select id="wb-e-logic">
+                  <option value="AND_ANY">同时命中任意一个</option>
+                  <option value="AND_ALL">同时命中全部</option>
+                  <option value="NOT_ANY">这些词都不出现</option>
+                  <option value="NOT_ALL">这些词不同时出现</option>
+                </select>
+              </label>
+            </details>
+
+            <div class="wb-checks">
+              <label class="check">
+                <input id="wb-e-constant" type="checkbox" />
+                <span class="check-text">
+                  <span class="check-title">常驻条目</span>
+                  <span class="check-desc">不需要关键词，每轮都注入</span>
+                </span>
+              </label>
+              <label class="check">
+                <input id="wb-e-enabled" type="checkbox" checked />
+                <span class="check-text">
+                  <span class="check-title">启用这条条目</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="wb-form-foot">
+              <button id="btn-del-entry" class="btn btn-danger btn-sm" type="button">删除条目</button>
+              <button id="btn-save-entry" class="btn btn-primary btn-sm" type="button">保存条目</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <footer class="modal-foot">
+        <span id="wb-foot-hint" class="foot-hint">世界书只保存在你自己电脑上</span>
+        <div class="foot-actions">
+          <button id="btn-close-worldbooks-2" class="btn btn-ghost" type="button">关闭</button>
         </div>
       </footer>
     </div>

@@ -42,6 +42,12 @@ contextBridge.exposeInMainWorld('barbara', {
   saveCharactersNow: (payload) => ipcRenderer.send('characters:save-sync', payload),
   importCard: () => ipcRenderer.invoke('characters:import'),
 
+  // --- 世界书 ---
+  getWorldbooks: () => ipcRenderer.invoke('worldbooks:get'),
+  saveWorldbooks: (payload) => ipcRenderer.invoke('worldbooks:save', payload),
+  saveWorldbooksNow: (payload) => ipcRenderer.send('worldbooks:save-sync', payload),
+  previewWorldbook: (payload) => ipcRenderer.invoke('worldbooks:preview', payload),
+
   // --- 图片 ---
   pickImage: () => ipcRenderer.invoke('images:pick'),
 

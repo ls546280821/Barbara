@@ -25,6 +25,7 @@ const el = {
   btnSettings: $('btn-settings'),
   btnFolder: $('btn-folder'),
   btnChars: $('btn-chars'),
+  btnWorldbooks: $('btn-worldbooks'),
   btnTheme: $('btn-theme'),
   modal: $('settings-modal'),
   btnCloseSettings: $('btn-close-settings'),
@@ -68,6 +69,8 @@ const el = {
     post: $('c-post'),
     notes: $('c-notes')
   },
+  charWorldbookList: $('char-worldbook-list'),
+  btnOpenWorldbooks: $('btn-open-worldbooks'),
   s: {
     temp: $('s-temp'),
     maxTokens: $('s-maxtokens'),
@@ -83,6 +86,41 @@ const el = {
     baseUrl: $('p-baseurl'),
     apiKey: $('p-apikey'),
     models: $('p-models')
+  },
+  // 世界书
+  wb: {
+    modal: $('worldbooks-modal'),
+    btnClose: $('btn-close-worldbooks'),
+    btnClose2: $('btn-close-worldbooks-2'),
+    btnImport: $('btn-import-lorebook'),
+    btnNew: $('btn-new-worldbook'),
+    list: $('wb-list'),
+    entriesEmpty: $('wb-entries-empty'),
+    entriesWrap: $('wb-entries-wrap'),
+    name: $('wb-name'),
+    entryCount: $('wb-entry-count'),
+    entryList: $('wb-entry-list'),
+    btnPreview: $('btn-preview-wb'),
+    btnNewEntry: $('btn-new-entry'),
+    btnDelBook: $('btn-del-worldbook'),
+    btnBind: $('btn-bind-worldbook-2'),
+    btnBindConvo: $('btn-bind-worldbook-3'),
+    formEmpty: $('wb-form-empty'),
+    form: $('wb-form'),
+    footHint: $('wb-foot-hint'),
+    e: {
+      title: $('wb-e-title'),
+      keys: $('wb-e-keys'),
+      content: $('wb-e-content'),
+      order: $('wb-e-order'),
+      prob: $('wb-e-prob'),
+      keys2: $('wb-e-keys2'),
+      logic: $('wb-e-logic'),
+      constant: $('wb-e-constant'),
+      enabled: $('wb-e-enabled')
+    },
+    btnDelEntry: $('btn-del-entry'),
+    btnSaveEntry: $('btn-save-entry')
   }
 };
 
@@ -91,6 +129,7 @@ const state = {
   presets: [],
   conversations: [],
   characters: [],
+  worldbooks: [],
   activeId: null,
   streaming: false,
   requestId: null,
@@ -102,6 +141,8 @@ let toastTimer = null;
 let editingProviderId = null; // 设置弹窗里当前正在编辑的服务商
 let editingCharacterId = null; // 角色库里当前正在编辑的角色
 let charDraftAvatar = ''; // 正在编辑的角色头像（dataURL）
+let editingWorldbookId = null; // 世界书弹窗里当前选中的世界书
+let editingEntryId = null; // 当前正在编辑的条目
 
 // ---------------------------------------------------------------------------
 //  常量配置
@@ -199,6 +240,67 @@ function characterById(id) {
 /** 当前会话绑定的角色（没绑就是 null，走通用助手） */
 function characterForConvo(convo) {
   return convo ? characterById(convo.characterId) : null;
+}
+
+// --- 世界书 ---
+
+function worldbooks() {
+  return Array.isArray(state.worldbooks) ? state.worldbooks : [];
+}
+
+function worldbookById(id) {
+  if (!id) return null;
+  return worldbooks().find((w) => w.id === id) || null;
+}
+
+/** 会话绑定了哪些世界书（id 列表，容错老数据） */
+function convoWorldbookIds(convo) {
+  return convo && Array.isArray(convo.worldbookIds) ? convo.worldbookIds : [];
+}
+
+/** 当前会话生效的世界书总数（会话级 + 角色级，去重） */
+function effectiveWorldbookCount(convo) {
+  if (!convo) return 0;
+  const character = characterForConvo(convo);
+  const ids = new Set([
+    ...convoWorldbookIds(convo),
+    ...((character && character.worldbookIds) || [])
+  ]);
+  return ids.size;
+}
+
+/**
+ * 扫一遍近期消息，把命中的世界书条目拼成注入块。
+ * 匹配逻辑在主进程（那里才有书和角色数据），渲染层只负责拿结果。
+ */
+const WORLDBOOK_SCAN_DEPTH = 6;
+
+async function matchWorldbookSection(convo) {
+  const character = characterForConvo(convo);
+
+  // 会话绑定的 + 角色自带的，两批都要考虑
+  const convoIds = Array.isArray(convo.worldbookIds) ? convo.worldbookIds : [];
+  const charIds = character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
+  const allIds = [...new Set([...convoIds, ...charIds])];
+  if (!allIds.length) return '';
+
+  const history = convo.messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+  );
+
+  try {
+    const result = await api.previewWorldbook({
+      characterId: character ? character.id : '',
+      worldbookIds: convoIds,
+      scanDepth: WORLDBOOK_SCAN_DEPTH,
+      messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
+    });
+    return (result && result.section) || '';
+  } catch (err) {
+    // 世界书匹配失败不该拦住正常聊天
+    console.error('世界书匹配失败', err);
+    return '';
+  }
 }
 
 /** {{user}} 的替换值 */
@@ -604,6 +706,23 @@ function renderMarkdown(source, options) {
     }
 
     closeList();
+
+    // 心理描写：以标记开头的整段单独成块，渲染成弱化的旁白样式。
+    // 标记本身不显示 —— 有样式就不需要文字标记占位了。
+    // 只认「段落以标记开头」，所以正文里提到「【心理】」这三个字不会被误伤；
+    // 流式生成时半截标记（「【心」）也匹配不上，不会闪。
+    const inner = trimmed.match(/^【(心理|内心|心声)】\s*(.*)$/);
+    if (inner) {
+      out.push(`<p class="msg-inner">${renderInline(inner[2])}</p>`);
+      continue;
+    }
+
+    const aside = trimmed.match(/^【(旁白|上帝视角|全知)】\s*(.*)$/);
+    if (aside) {
+      out.push(`<p class="msg-aside">${renderInline(aside[2])}</p>`);
+      continue;
+    }
+
     out.push(`<p>${renderInline(trimmed)}</p>`);
   }
   closeList();
@@ -677,6 +796,10 @@ function renderHeader() {
   } else {
     el.convoMeta.textContent = `${prefix}${endpoint.provider.name} · ${endpoint.model || '未选模型'}`;
   }
+
+  // 这个会话生效的世界书数量：会话绑的 + 角色带的（去重）
+  const wbCount = effectiveWorldbookCount(convo);
+  if (wbCount) el.convoMeta.textContent += ` · 世界书 ${wbCount} 本`;
 
   el.hintText.textContent = settings.sendOnEnter === false
     ? 'Ctrl + Enter 发送 · Enter 换行'
@@ -1037,7 +1160,9 @@ function createConvo(activate) {
     createdAt: now(),
     updatedAt: now(),
     messages: [],
-    characterId: source ? source.characterId || null : null
+    characterId: source ? source.characterId || null : null,
+    // 会话自己绑的世界书。角色自带的世界书仍然生效，两边会合并。
+    worldbookIds: []
   };
   state.conversations.unshift(convo);
   if (activate !== false) state.activeId = convo.id;
@@ -1156,7 +1281,7 @@ async function removeMessage(index) {
  * 绑定了角色卡时不再使用「设置」里的全局人设 —— 否则你扮演雷电将军，
  * 系统提示词却在说「你是芭芭拉」，模型会精神分裂。
  */
-function buildApiMessages(convo) {
+function buildApiMessages(convo, worldbookSection) {
   const settings = state.settings || {};
   const character = characterForConvo(convo);
   const me = userName();
@@ -1202,6 +1327,13 @@ function buildApiMessages(convo) {
   }
 
   if (parts.length) messages.push({ role: 'system', content: parts.join('\n\n') });
+
+  // ---- 1.5 世界书：命中的设定紧跟人设之后 ----
+  // 放在角色定义后面（酒馆叫 After Char Defs）——比角色本身靠前会稀释人设，
+  // 比对话历史靠后又容易被忽略，这里是比较稳的位置。
+  if (String(worldbookSection || '').trim()) {
+    messages.push({ role: 'system', content: String(worldbookSection).trim() });
+  }
 
   // ---- 2. 示例对话 ----
   // 注意：parseExampleDialogue 只剥掉了行首的「{{user}}:」前缀，
@@ -1283,6 +1415,11 @@ async function requestCompletion(convo) {
     return;
   }
 
+  // 世界书在渲染层匹配（和 buildApiMessages 同一个进程，省一次往返）。
+  // 之前这里要求「消息数 ≥ 3」才匹配，但那会让世界模型的第一个回合拿不到设定 ——
+  // 而开场引导往往正是最需要世界书的时候。匹配本身是本地纯计算，不省这一下。
+  const worldbookSection = await matchWorldbookSection(convo);
+
   const requestId = uid();
   state.requestId = requestId;
 
@@ -1320,7 +1457,7 @@ async function requestCompletion(convo) {
       requestId,
       providerId: endpoint.provider.id,
       model: endpoint.model,
-      messages: buildApiMessages(convo)
+      messages: buildApiMessages(convo, worldbookSection)
     });
 
     if (!response || response.ok !== true) {
@@ -1653,6 +1790,645 @@ async function fetchModels() {
 }
 
 // ---------------------------------------------------------------------------
+//  世界书（World Info / Lorebook）
+//  左栏选书，中栏列条目，右栏编辑。数据在主进程的 worldbooks.json，
+//  会话通过 character.worldbookIds 绑定，匹配由主进程负责。
+// ---------------------------------------------------------------------------
+
+const WB_NEW_ENTRY_DEFAULTS = {
+  order: 100,
+  probability: 100,
+  selectiveLogic: 'AND_ANY',
+  constant: false,
+  enabled: true
+};
+
+/** 世界书的条目数展示 */
+function wbEntryCountText(book) {
+  if (!book) return '';
+  const total = (book.entries || []).length;
+  const on = (book.entries || []).filter((e) => e.enabled !== false).length;
+  return on === total ? `${total} 条条目` : `${total} 条条目 · ${on} 条启用`;
+}
+
+function currentWorldbook() {
+  return worldbookById(editingWorldbookId);
+}
+
+function currentEntry() {
+  const book = currentWorldbook();
+  if (!book) return null;
+  return (book.entries || []).find((e) => e.id === editingEntryId) || null;
+}
+
+/** 把世界书表单里的内容写回内存 */
+function stashWorldbookName() {
+  const book = currentWorldbook();
+  if (!book || el.wb.entriesWrap.classList.contains('hidden')) return;
+  const name = el.wb.name.value.trim() || '未命名世界书';
+  book.name = name.slice(0, 120);
+  book.updatedAt = now();
+}
+
+/** 把条目表单里的内容写回内存 */
+function stashEntryForm() {
+  const entry = currentEntry();
+  if (!entry || el.wb.form.classList.contains('hidden')) return;
+
+  const parseKeys = (value) =>
+    String(value || '')
+      .split(/[,，]/)
+      .map((k) => k.trim())
+      .filter(Boolean)
+      .slice(0, 200);
+
+  entry.title = el.wb.e.title.value.trim().slice(0, 200) || parseKeys(el.wb.e.keys.value)[0] || '未命名条目';
+  entry.keys = parseKeys(el.wb.e.keys.value);
+  entry.secondaryKeys = parseKeys(el.wb.e.keys2.value);
+  entry.selectiveLogic = el.wb.e.logic.value;
+  entry.content = el.wb.e.content.value.slice(0, 20000);
+
+  const order = Number(el.wb.e.order.value);
+  entry.order = isFinite(order) ? Math.max(0, Math.min(9999, Math.floor(order))) : WB_NEW_ENTRY_DEFAULTS.order;
+
+  const prob = Number(el.wb.e.prob.value);
+  entry.probability = isFinite(prob) ? Math.max(0, Math.min(100, Math.floor(prob))) : 100;
+
+  entry.constant = el.wb.e.constant.checked;
+  entry.enabled = el.wb.e.enabled.checked;
+}
+
+function renderWorldbookList() {
+  el.wb.list.innerHTML = '';
+
+  const list = worldbooks();
+  if (!list.length) {
+    const tip = document.createElement('div');
+    tip.className = 'wb-list-empty';
+    tip.textContent = '还没有世界书';
+    el.wb.list.appendChild(tip);
+    return;
+  }
+
+  // 给绑定的书加标记，方便看出哪些在用、绑在哪一层
+  const boundToChar = new Set((characterById(editingCharacterId) || {}).worldbookIds || []);
+  const boundToConvo = new Set(convoWorldbookIds(activeConvo()));
+
+  for (const book of list) {
+    const item = document.createElement('div');
+    item.className = `wb-item${book.id === editingWorldbookId ? ' active' : ''}`;
+    item.title = book.name;
+    item.addEventListener('click', () => selectWorldbook(book.id));
+
+    const name = document.createElement('div');
+    name.className = 'wb-item-name';
+    name.textContent = book.name;
+
+    const scopes = [];
+    if (boundToConvo.has(book.id)) scopes.push('会话');
+    if (boundToChar.has(book.id)) scopes.push('角色');
+
+    const sub = document.createElement('div');
+    sub.className = 'wb-item-sub';
+    sub.textContent = scopes.length
+      ? `已绑${scopes.join('+')} · ${wbEntryCountText(book)}`
+      : wbEntryCountText(book);
+
+    item.append(name, sub);
+    el.wb.list.appendChild(item);
+  }
+}
+
+function renderEntryList() {
+  el.wb.entryList.innerHTML = '';
+
+  const book = currentWorldbook();
+  if (!book) return;
+
+  const entries = book.entries || [];
+  if (!entries.length) {
+    const tip = document.createElement('div');
+    tip.className = 'wb-list-empty';
+    tip.textContent = '这本书还没有条目，点「＋ 条目」加一条';
+    el.wb.entryList.appendChild(tip);
+    return;
+  }
+
+  for (const entry of entries) {
+    const item = document.createElement('div');
+    item.className = `wb-entry${entry.id === editingEntryId ? ' active' : ''}${
+      entry.enabled === false ? ' disabled' : ''
+    }`;
+    item.title = entry.title;
+    item.addEventListener('click', () => selectEntry(entry.id));
+
+    const title = document.createElement('div');
+    title.className = 'wb-entry-title';
+
+    const label = document.createElement('span');
+    label.textContent = entry.title;
+    title.appendChild(label);
+
+    if (entry.constant) {
+      const badge = document.createElement('span');
+      badge.className = 'wb-badge';
+      badge.textContent = '常驻';
+      title.appendChild(badge);
+    }
+    if (entry.enabled === false) {
+      const badge = document.createElement('span');
+      badge.className = 'wb-badge';
+      badge.textContent = '停用';
+      title.appendChild(badge);
+    }
+
+    const keys = document.createElement('div');
+    keys.className = 'wb-entry-keys';
+    keys.textContent = (entry.keys || []).join(' / ') || '（无关键词）';
+
+    item.append(title, keys);
+    el.wb.entryList.appendChild(item);
+  }
+}
+
+function showEntryForm(show) {
+  el.wb.form.classList.toggle('hidden', !show);
+  el.wb.formEmpty.classList.toggle('hidden', !!show);
+}
+
+function fillEntryForm(entry) {
+  if (!entry) {
+    showEntryForm(false);
+    return;
+  }
+
+  el.wb.e.title.value = entry.title || '';
+  el.wb.e.keys.value = (entry.keys || []).join(', ');
+  el.wb.e.content.value = entry.content || '';
+  el.wb.e.order.value = String(entry.order ?? WB_NEW_ENTRY_DEFAULTS.order);
+  el.wb.e.prob.value = String(entry.probability ?? 100);
+  el.wb.e.keys2.value = (entry.secondaryKeys || []).join(', ');
+  el.wb.e.logic.value = entry.selectiveLogic || 'AND_ANY';
+  el.wb.e.constant.checked = entry.constant === true;
+  el.wb.e.enabled.checked = entry.enabled !== false;
+
+  showEntryForm(true);
+}
+
+/** 选中一本世界书 */
+function selectWorldbook(id) {
+  stashWorldbookName();
+  stashEntryForm();
+
+  editingWorldbookId = id;
+  const book = currentWorldbook();
+
+  el.wb.entriesEmpty.classList.toggle('hidden', !!book);
+  el.wb.entriesWrap.classList.toggle('hidden', !book);
+
+  if (!book) {
+    editingEntryId = null;
+    showEntryForm(false);
+    syncBindControls();
+    syncConvoBindControls();
+    renderWorldbookList();
+    return;
+  }
+
+  el.wb.name.value = book.name;
+  el.wb.entryCount.textContent = wbEntryCountText(book);
+  el.wb.footHint.textContent = `「${book.name}」只保存在你自己电脑上`;
+
+  // 上一本书选中的条目在新书里不存在，自动落到第一条
+  if (!currentEntry()) {
+    editingEntryId = (book.entries || []).length ? book.entries[0].id : null;
+  }
+
+  renderWorldbookList();
+  renderEntryList();
+  fillEntryForm(currentEntry());
+  syncBindControls();
+  syncConvoBindControls();
+}
+
+function selectEntry(id) {
+  stashEntryForm();
+  editingEntryId = id;
+  renderEntryList();
+  fillEntryForm(currentEntry());
+}
+
+/**
+ * 角色表单里的世界书清单：把**所有**世界书列出来，勾选即绑定。
+ * 之前只列出已绑定的，绑定还得进弹窗点按钮，入口太隐蔽。
+ */
+function renderCharWorldbookList() {
+  const character = characterById(editingCharacterId);
+  const host = el.charWorldbookList;
+  host.innerHTML = '';
+
+  if (!character) return;
+
+  const all = worldbooks();
+  if (!all.length) {
+    const tip = document.createElement('p');
+    tip.className = 'field-help';
+    tip.textContent = '还没有世界书。点上面的「打开世界书编辑器」新建或导入一本。';
+    host.appendChild(tip);
+    return;
+  }
+
+  const boundIds = new Set(character.worldbookIds || []);
+
+  for (const book of all) {
+    const bound = boundIds.has(book.id);
+
+    const row = document.createElement('label');
+    row.className = `wb-bind-row${bound ? ' bound' : ''}`;
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = bound;
+    box.addEventListener('change', () => setWorldbookBound(book.id, box.checked));
+
+    const text = document.createElement('span');
+    text.className = 'wb-bind-text';
+
+    const name = document.createElement('span');
+    name.className = 'wb-bind-name';
+    name.textContent = book.name;
+
+    const count = document.createElement('span');
+    count.className = 'wb-bind-count';
+    count.textContent = wbEntryCountText(book);
+
+    text.append(name, count);
+    row.append(box, text);
+    host.appendChild(row);
+  }
+}
+
+/** 勾选 / 取消勾选：直接改绑定关系并落盘 */
+async function setWorldbookBound(bookId, bound) {
+  const character = characterById(editingCharacterId);
+  if (!character) return;
+
+  const current = new Set(character.worldbookIds || []);
+  if (bound) current.add(bookId);
+  else current.delete(bookId);
+
+  character.worldbookIds = [...current];
+  character.updatedAt = now();
+
+  renderCharWorldbookList();
+  renderWorldbookList();
+  syncBindControls();
+
+  // 写盘失败就把勾选状态撤回来，不然界面显示已绑定、磁盘上却没有
+  const ok = await persistLibrary();
+  if (!ok) {
+    if (bound) current.delete(bookId);
+    else current.add(bookId);
+    character.worldbookIds = [...current];
+    renderCharWorldbookList();
+    renderWorldbookList();
+    syncBindControls();
+  }
+}
+
+/**
+ * 把当前角色的世界书绑定关系同步到磁盘。
+ * 角色卡和世界书是两个文件，主进程允许一次写入同时带上两者。
+ * 返回是否成功 —— 绑定这类操作失败时界面要回滚，不能假装成功。
+ */
+async function persistLibrary() {
+  try {
+    await api.saveCharacters({ characters: characters(), worldbooks: worldbooks() });
+    return true;
+  } catch (err) {
+    console.error('保存世界书失败', err);
+    showToast('世界书没能保存到磁盘', 'error');
+    return false;
+  }
+}
+
+function isWorldbookBound(bookId) {
+  const character = characterById(editingCharacterId);
+  if (!character || !bookId) return false;
+  return (character.worldbookIds || []).includes(bookId);
+}
+
+function syncBindControls() {
+  const book = currentWorldbook();
+  if (!el.wb.btnBind) return;
+
+  if (!book) {
+    el.wb.btnBind.disabled = true;
+    el.wb.btnBind.textContent = '绑定到角色';
+    return;
+  }
+
+  el.wb.btnBind.disabled = false;
+  el.wb.btnBind.textContent = isWorldbookBound(book.id) ? '从角色解绑' : '绑定到角色';
+}
+
+/** 绑定 / 解绑当前选中的这本书（角色来自角色库里正在编辑的角色） */
+async function toggleBindWorldbook() {
+  const character = characterById(editingCharacterId);
+  const book = currentWorldbook();
+
+  if (!character) {
+    showToast('先在角色库里选中一个角色', 'error');
+    return;
+  }
+  if (!book) return;
+
+  const bound = isWorldbookBound(book.id);
+  if (bound) {
+    character.worldbookIds = (character.worldbookIds || []).filter((id) => id !== book.id);
+  } else {
+    character.worldbookIds = [...(character.worldbookIds || []), book.id];
+  }
+  character.updatedAt = now();
+
+  syncBindControls();
+  renderWorldbookList();
+  renderCharWorldbookList();
+
+  // 写盘失败就把绑定关系撤回来
+  const ok = await persistLibrary();
+  if (!ok) {
+    if (isWorldbookBound(book.id)) {
+      character.worldbookIds = (character.worldbookIds || []).filter((id) => id !== book.id);
+    } else {
+      character.worldbookIds = [...(character.worldbookIds || []), book.id];
+    }
+    syncBindControls();
+    renderWorldbookList();
+    renderCharWorldbookList();
+    return;
+  }
+
+  showToast(bound ? `已解绑「${book.name}」` : `已绑定「${book.name}」`, 'ok');
+}
+
+// --- 会话级世界书 ---------------------------------------------------------
+
+function isWorldbookBoundToConvo(bookId) {
+  const convo = activeConvo();
+  if (!convo || !bookId) return false;
+  return convoWorldbookIds(convo).includes(bookId);
+}
+
+function syncConvoBindControls() {
+  if (!el.wb.btnBindConvo) return;
+  const book = currentWorldbook();
+
+  if (!book) {
+    el.wb.btnBindConvo.disabled = true;
+    el.wb.btnBindConvo.textContent = '绑定到会话';
+    return;
+  }
+
+  el.wb.btnBindConvo.disabled = false;
+  el.wb.btnBindConvo.textContent = isWorldbookBoundToConvo(book.id) ? '从会话解绑' : '绑定到会话';
+}
+
+/** 绑定 / 解绑当前选中的这本书到当前会话 */
+async function toggleBindWorldbookToConvo() {
+  const convo = activeConvo();
+  const book = currentWorldbook();
+
+  if (!convo) {
+    showToast('当前没有会话', 'error');
+    return;
+  }
+  if (!book) return;
+
+  const bound = isWorldbookBoundToConvo(book.id);
+  const ids = new Set(convoWorldbookIds(convo));
+  if (bound) ids.delete(book.id);
+  else ids.add(book.id);
+
+  convo.worldbookIds = [...ids];
+  convo.updatedAt = now();
+
+  syncConvoBindControls();
+  renderWorldbookList();
+  renderHeader();
+  persistConversations(0);
+
+  showToast(
+    bound ? `已从当前会话解绑「${book.name}」` : `已绑定「${book.name}」到当前会话`,
+    'ok'
+  );
+}
+
+function openWorldbooksModal() {
+  // 角色库可能没开着（侧边栏可以直接进世界书），stashCharForm 内部会自己判断
+  stashCharForm();
+
+  if (!editingWorldbookId || !currentWorldbook()) {
+    editingWorldbookId = worldbooks().length ? worldbooks()[0].id : null;
+  }
+
+  renderWorldbookList();
+  selectWorldbook(editingWorldbookId);
+  renderCharWorldbookList();
+  syncConvoBindControls();
+
+  el.wb.modal.classList.remove('hidden');
+}
+
+function closeWorldbooksModal() {
+  stashWorldbookName();
+  stashEntryForm();
+
+  el.wb.modal.classList.add('hidden');
+  renderCharWorldbookList();
+  renderWorldbookList();
+  persistLibrary();
+}
+
+function newWorldbook() {
+  stashWorldbookName();
+  stashEntryForm();
+
+  const book = {
+    id: `w${uid()}`,
+    name: '新世界书',
+    entries: [],
+    createdAt: now(),
+    updatedAt: now()
+  };
+
+  state.worldbooks = [...worldbooks(), book];
+  selectWorldbook(book.id);
+  el.wb.name.focus();
+  el.wb.name.select();
+}
+
+function newEntry() {
+  const book = currentWorldbook();
+  if (!book) return;
+
+  stashEntryForm();
+
+  const entry = {
+    id: `e${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`,
+    title: '新条目',
+    keys: [],
+    secondaryKeys: [],
+    selectiveLogic: WB_NEW_ENTRY_DEFAULTS.selectiveLogic,
+    content: '',
+    order: WB_NEW_ENTRY_DEFAULTS.order,
+    constant: false,
+    matchWholeWords: false,
+    caseSensitive: false,
+    probability: WB_NEW_ENTRY_DEFAULTS.probability,
+    enabled: true
+  };
+
+  book.entries = [...(book.entries || []), entry];
+  book.updatedAt = now();
+
+  el.wb.entryCount.textContent = wbEntryCountText(book);
+  renderEntryList();
+  selectEntry(entry.id);
+
+  el.wb.e.title.focus();
+  el.wb.e.title.select();
+}
+
+async function saveEntry() {
+  const entry = currentEntry();
+  const book = currentWorldbook();
+  if (!entry || !book) return;
+
+  stashEntryForm();
+
+  // 没关键词又不是常驻的条目永远不会触发，提醒一下（但不阻止保存）
+  if (!entry.constant && !entry.keys.length) {
+    showToast('这条既没有关键词、也不是常驻，永远不会被注入', 'error');
+  }
+
+  book.updatedAt = now();
+  el.wb.entryCount.textContent = wbEntryCountText(book);
+  renderEntryList();
+  fillEntryForm(entry);
+
+  await persistLibrary();
+  showToast('条目已保存', 'ok');
+}
+
+async function deleteEntry() {
+  const entry = currentEntry();
+  const book = currentWorldbook();
+  if (!entry || !book) return;
+
+  stashEntryForm();
+
+  const ok = await confirmDialog({
+    title: '删除条目',
+    message: `删除条目「${entry.title}」？`,
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
+
+  book.entries = (book.entries || []).filter((e) => e.id !== entry.id);
+  book.updatedAt = now();
+
+  editingEntryId = book.entries.length ? book.entries[0].id : null;
+  el.wb.entryCount.textContent = wbEntryCountText(book);
+  renderEntryList();
+  fillEntryForm(currentEntry());
+
+  await persistLibrary();
+  showToast('条目已删除');
+}
+
+async function deleteWorldbook() {
+  const book = currentWorldbook();
+  if (!book) return;
+
+  stashWorldbookName();
+
+  const boundTo = characters().filter((c) => (c.worldbookIds || []).includes(book.id));
+
+  const ok = await confirmDialog({
+    title: '删除世界书',
+    message: boundTo.length
+      ? `删除「${book.name}」？它正被 ${boundTo.length} 个角色使用，删除后这些角色会失去这本书的设定。`
+      : `删除「${book.name}」？这本书里的 ${(book.entries || []).length} 条条目会一起删掉。`,
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
+
+  state.worldbooks = worldbooks().filter((w) => w.id !== book.id);
+
+  // 同步把角色上的绑定清掉，别留下指向空气的 id
+  for (const c of characters()) {
+    if ((c.worldbookIds || []).includes(book.id)) {
+      c.worldbookIds = c.worldbookIds.filter((id) => id !== book.id);
+    }
+  }
+
+  editingWorldbookId = worldbooks().length ? worldbooks()[0].id : null;
+  selectWorldbook(editingWorldbookId);
+  renderCharWorldbookList();
+
+  await persistLibrary();
+  showToast('世界书已删除');
+}
+
+/**
+ * 预览当前会话下会命中哪些条目。
+ * 用的就是真实请求时的扫描逻辑，方便排查关键词写没写对。
+ */
+async function previewWorldbook() {
+  const character = characterById(editingCharacterId);
+  const convo = activeConvo();
+
+  if (!convo) {
+    showToast('当前没有会话', 'error');
+    return;
+  }
+
+  const history = convo.messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+  );
+
+  if (!history.length) {
+    showToast('这个会话还没有消息，先聊两句再看预览', 'error');
+    return;
+  }
+
+  try {
+    const result = await api.previewWorldbook({
+      characterId: character ? character.id : '',
+      worldbookIds: convoWorldbookIds(convo),
+      scanDepth: WORLDBOOK_SCAN_DEPTH,
+      messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
+    });
+
+    const hits = (result && result.hits) || [];
+    if (!hits.length) {
+      showToast(`扫了最近 ${result.scanDepth} 条消息，${result.total} 条条目一条都没命中`, 'error');
+      return;
+    }
+
+    // 带上世界书名，多本书时能看出命中来自哪一本
+    const names = hits.map((h) => (h.worldbookName ? `${h.worldbookName}/${h.title}` : h.title)).join('、');
+    showToast(`命中 ${hits.length} 条：${names}`);
+  } catch (err) {
+    console.error('预览失败', err);
+    showToast('预览失败', 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
 //  事件绑定
 // ---------------------------------------------------------------------------
 
@@ -1729,6 +2505,35 @@ function bindEvents() {
   // 点头像换图 / 清除头像
   el.charAvatar.addEventListener('click', pickAvatar);
   el.btnClearAvatar.addEventListener('click', clearAvatar);
+
+  // 世界书：侧边栏独立入口 + 角色表单里的入口
+  el.btnWorldbooks.addEventListener('click', openWorldbooksModal);
+  el.btnOpenWorldbooks.addEventListener('click', openWorldbooksModal);
+
+  el.wb.btnClose.addEventListener('click', closeWorldbooksModal);
+  el.wb.btnClose2.addEventListener('click', closeWorldbooksModal);
+  el.wb.btnImport.addEventListener('click', importWorldbooks);
+  el.wb.btnNew.addEventListener('click', newWorldbook);
+  el.wb.btnNewEntry.addEventListener('click', newEntry);
+  el.wb.btnDelBook.addEventListener('click', deleteWorldbook);
+  el.wb.btnDelEntry.addEventListener('click', deleteEntry);
+  el.wb.btnSaveEntry.addEventListener('click', saveEntry);
+  el.wb.btnPreview.addEventListener('click', previewWorldbook);
+  el.wb.btnBind.addEventListener('click', toggleBindWorldbook);
+  el.wb.btnBindConvo.addEventListener('click', toggleBindWorldbookToConvo);
+
+  // 世界书名称和条目内容都是边打字边留在内存里，关闭弹窗时统一落盘
+  el.wb.name.addEventListener('input', () => {
+    const book = currentWorldbook();
+    if (!book) return;
+    book.name = el.wb.name.value.trim() || '未命名世界书';
+    renderWorldbookList();
+    renderCharWorldbookList();
+  });
+
+  el.wb.modal.addEventListener('click', (event) => {
+    if (event.target === el.wb.modal) closeWorldbooksModal();
+  });
 
   // 左上角的昼夜切换
   el.btnTheme.addEventListener('click', toggleTheme);
@@ -1837,7 +2642,9 @@ function bindEvents() {
 
   window.addEventListener('beforeunload', () => {
     api.saveConversationsNow({ conversations: state.conversations, activeId: state.activeId });
-    api.saveCharactersNow({ characters: characters() });
+    // 世界书必须跟着角色一起写：主进程收到 worldbooks 才会更新那个文件。
+    // 漏掉的话，刷新/关闭时角色绑定关系会指向一本已经不在磁盘上的书。
+    api.saveCharactersNow({ characters: characters(), worldbooks: worldbooks() });
   });
 }
 
@@ -1846,7 +2653,9 @@ function bindEvents() {
 // ---------------------------------------------------------------------------
 
 function persistCharacters(immediate) {
-  const payload = { characters: characters() };
+  // 角色和世界书分开存两个文件，但经常需要一起落盘（保存世界书后要同步绑定关系），
+  // 所以主进程允许一次请求同时带上 worldbooks。
+  const payload = { characters: characters(), worldbooks: worldbooks() };
 
   if (immediate) {
     api.saveCharactersNow(payload);
@@ -2072,6 +2881,7 @@ function fillCharForm(character) {
         : '这是你自己写的角色';
 
   showCharForm(true);
+  renderCharWorldbookList();
 }
 
 /** 把表单里的内容写回内存里的角色对象（切走或保存前调用） */
@@ -2114,6 +2924,7 @@ function newCharacter() {
     creatorNotes: '',
     tags: [],
     source: 'manual',
+    worldbookIds: [],
     createdAt: now(),
     updatedAt: now()
   };
@@ -2208,10 +3019,11 @@ async function importCards() {
   if (!result || result.canceled) return;
 
   const added = Array.isArray(result.characters) ? result.characters : [];
+  const addedBooks = Array.isArray(result.worldbooks) ? result.worldbooks : [];
   const errors = Array.isArray(result.errors) ? result.errors : [];
 
-  if (!added.length) {
-    showToast(errors.length ? errors[0] : '没有导入任何角色', 'error');
+  if (!added.length && !addedBooks.length) {
+    showToast(errors.length ? errors[0] : '没有导入任何内容', 'error');
     return;
   }
 
@@ -2219,17 +3031,109 @@ async function importCards() {
   const stamp = Date.now().toString(36);
   const fresh = added.map((c, i) => ({ ...c, id: `c${stamp}-${i}` }));
 
+  // 角色卡里内嵌的世界书要跟着一起换 id，否则绑定关系还指着主进程发的旧 id
+  const idMap = new Map();
+  const freshBooks = addedBooks.map((w, i) => {
+    const id = `w${stamp}-${i}`;
+    idMap.set(w.id, id);
+    return { ...w, id };
+  });
+  for (const c of fresh) {
+    if (Array.isArray(c.worldbookIds)) {
+      c.worldbookIds = c.worldbookIds.map((id) => idMap.get(id) || id).filter(Boolean);
+    }
+  }
+
+  state.worldbooks = [...worldbooks(), ...freshBooks];
   state.characters = [...characters(), ...fresh];
-  editingCharacterId = fresh[0].id;
+  if (fresh.length) editingCharacterId = fresh[0].id;
 
   renderCharList();
   fillCharForm(characterById(editingCharacterId));
   await persistCharacters();
 
-  showToast(`已导入 ${fresh.length} 个角色：${fresh.map((c) => c.name).join('、')}`, 'ok');
+  const parts = [];
+  if (fresh.length) parts.push(`${fresh.length} 个角色：${fresh.map((c) => c.name).join('、')}`);
+  if (freshBooks.length) parts.push(`${freshBooks.length} 个世界书`);
+
+  showToast(`已导入 ${parts.join('，')}`, 'ok');
 
   if (errors.length) {
-    console.warn('部分角色卡导入失败：', errors);
+    console.warn('部分内容导入失败：', errors);
+    setTimeout(
+      () => showToast(`${errors.length} 个文件没能导入：${errors[0]}`, 'error'),
+      CONFIG.TOAST_DURATION_MS + 300
+    );
+  }
+}
+
+/**
+ * 在世界书弹窗里「导入世界书」。
+ * 复用角色的导入通道（同一个文件框），只是落点不同：
+ * 角色照样进角色库，世界书则挂到当前选中的这本书所在的位置。
+ */
+async function importWorldbooks() {
+  stashWorldbookName();
+  stashEntryForm();
+
+  let result = null;
+  try {
+    el.wb.btnImport.disabled = true;
+    result = await api.importCard();
+  } catch (err) {
+    showToast((err && err.message) || '导入失败', 'error');
+    return;
+  } finally {
+    el.wb.btnImport.disabled = false;
+  }
+
+  if (!result || result.canceled) return;
+
+  const added = Array.isArray(result.characters) ? result.characters : [];
+  const addedBooks = Array.isArray(result.worldbooks) ? result.worldbooks : [];
+  const errors = Array.isArray(result.errors) ? result.errors : [];
+
+  if (!addedBooks.length && !added.length) {
+    showToast(errors.length ? errors[0] : '没有导入任何内容', 'error');
+    return;
+  }
+
+  // 主进程可能同一毫秒里生成多个 id，这里统一重发一批，避免撞车
+  const stamp = Date.now().toString(36);
+  const idMap = new Map();
+  const freshBooks = addedBooks.map((w, i) => {
+    const id = `w${stamp}-${i}`;
+    idMap.set(w.id, id);
+    return { ...w, id };
+  });
+  const freshChars = added.map((c, i) => {
+    const next = { ...c, id: `c${stamp}-${i}` };
+    if (Array.isArray(next.worldbookIds)) {
+      next.worldbookIds = next.worldbookIds.map((id) => idMap.get(id) || id).filter(Boolean);
+    }
+    return next;
+  });
+
+  state.worldbooks = [...worldbooks(), ...freshBooks];
+  if (freshChars.length) state.characters = [...characters(), ...freshChars];
+
+  if (freshBooks.length) {
+    selectWorldbook(freshBooks[freshBooks.length - 1].id);
+  } else {
+    renderWorldbookList();
+  }
+
+  renderCharList();
+  renderCharWorldbookList();
+  await persistLibrary();
+
+  const parts = [];
+  if (freshBooks.length) parts.push(`${freshBooks.length} 本世界书`);
+  if (freshChars.length) parts.push(`${freshChars.length} 个角色`);
+  showToast(`已导入 ${parts.join('，')}`, 'ok');
+
+  if (errors.length) {
+    console.warn('部分内容导入失败：', errors);
     setTimeout(
       () => showToast(`${errors.length} 个文件没能导入：${errors[0]}`, 'error'),
       CONFIG.TOAST_DURATION_MS + 300
@@ -2254,6 +3158,15 @@ async function init() {
 
   const storedChars = await api.getCharacters();
   state.characters = Array.isArray(storedChars && storedChars.characters) ? storedChars.characters : [];
+
+  // 世界书读不到不该拦住启动，失败就当没有
+  try {
+    const storedBooks = await api.getWorldbooks();
+    state.worldbooks = Array.isArray(storedBooks && storedBooks.worldbooks) ? storedBooks.worldbooks : [];
+  } catch (err) {
+    console.error('读取世界书失败', err);
+    state.worldbooks = [];
+  }
 
   const stored = await api.getConversations();
   state.conversations = Array.isArray(stored.conversations) ? stored.conversations : [];

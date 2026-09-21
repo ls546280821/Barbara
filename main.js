@@ -119,7 +119,7 @@ function migrateLegacyData() {
     if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
 
     const migrated = [];
-    for (const name of ['config.json', 'conversations.json', 'characters.json']) {
+    for (const name of ['config.json', 'conversations.json', 'characters.json', 'worldbooks.json']) {
       const from = path.join(legacyDir, name);
       const to = path.join(newDir, name);
       // 只在「旧的有、新的没有」时复制，绝不覆盖用户的新数据
@@ -483,6 +483,13 @@ function newCharacterId() {
   return `c${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
 }
 
+// worldbookId 在 normalize 时不能凭空生成：那会让「保存两次」得到两个不同的 id，
+// 绑定关系就断了。所以只保留调用方给的值，没给就是空。
+function normalizeIdList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))];
+}
+
 /** 把任意来源的角色数据整理成内部统一格式，顺便挡住非法值 */
 function normalizeCharacter(raw, source) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -506,6 +513,8 @@ function normalizeCharacter(raw, source) {
       ? r.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 40)).slice(0, 20)
       : [],
     source: ['png', 'json', 'manual'].includes(r.source) ? r.source : source || 'manual',
+    // 绑定到这个世界书列表（按顺序注入）。老数据没有这个字段，默认空数组。
+    worldbookIds: normalizeIdList(r.worldbookIds).slice(0, 100),
     createdAt: Number(r.createdAt) || Date.now(),
     updatedAt: Number(r.updatedAt) || Date.now()
   };
@@ -521,11 +530,18 @@ function saveCharacters(payload, options) {
   const opts = options || {};
   const list = payload && Array.isArray(payload.characters) ? payload.characters : [];
   const data = { characters: list.map((c) => normalizeCharacter(c)) };
+  // 导入角色卡时可能顺带解析出内嵌世界书，跟角色同一次写入落盘
+  const hasWorldbooks = payload && Array.isArray(payload.worldbooks);
+  const books = hasWorldbooks
+    ? { worldbooks: payload.worldbooks.slice(-MAX_WORLDBOOKS).map((w) => normalizeWorldbook(w)) }
+    : null;
 
   if (opts.immediate) {
     writeJsonNow(charactersFile(), data);
+    if (books) writeJsonNow(worldbooksFile(), books);
   } else {
     writeJson(charactersFile(), data);
+    if (books) writeJson(worldbooksFile(), books);
   }
   return data;
 }
@@ -602,6 +618,8 @@ function cardAvatarToDataUrl(value) {
 /**
  * 把角色卡（v1 扁平 / v2、v3 包一层 data）转成内部格式。
  * 文件名在没写角色名时当兜底。
+ * 另外把卡里内嵌的世界书（character_book）一并解析出来 ——
+ * 以前它是被整个丢掉的，导致「导入后角色失忆」。
  */
 function characterFromCard(card, avatar, source, fallbackName) {
   if (!card || typeof card !== 'object') return null;
@@ -632,7 +650,354 @@ function characterFromCard(card, avatar, source, fallbackName) {
     source
   );
 
+  // v2 卡把世界书放在 data.character_book；也有工具放在顶层
+  character.worldbook = worldbookFromCharacterBook(
+    d.character_book || card.character_book,
+    character.name
+  );
+
   return character;
+}
+
+// ---------------------------------------------------------------------------
+//  世界书 / World Info（Lorebook）
+//  酒馆的「动态词典」：条目带关键词，只有关键词出现在近期对话里才注入提示词。
+//  两个来源：
+//    · 角色卡里内嵌的 character_book（以前会被直接丢掉，现在会存下来并自动绑定）
+//    · 单独导入的 lorebook JSON 文件
+//  数据存在 userData\worldbooks.json，会话通过 character.worldbookIds 绑定世界书。
+// ---------------------------------------------------------------------------
+
+// 单个世界书的条目数上限。酒馆那边不限制，但这里的匹配是每轮同步跑的，
+// 上万条会让每句话都卡一下，所以给一个足够宽松、但不会拖慢聊天的上限。
+const MAX_WORLDBOOK_ENTRIES = 5000;
+// 世界书数量上限。和会话一样给个上限，免得角色卡反复导入把文件撑到几十 MB。
+const MAX_WORLDBOOKS = 200;
+// 一条注入内容的最大长度，防止畸形文件把整个上下文撑爆
+const MAX_WORLDBOOK_CONTENT = 20000;
+// 每条目的关键词数量上限
+const MAX_WORLDBOOK_KEYS = 200;
+
+function worldbooksFile() {
+  return userDataFile('worldbooks.json');
+}
+
+function newWorldbookId() {
+  return `w${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
+}
+
+/** 把一条 entry 的不同写法（ST 的 key/keys、constant、order…）统一成内部格式 */
+function normalizeWorldbookEntry(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const str = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
+  const bool = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+
+  // ST 内部是 key + keysecondary；导出到 character_book 时叫 keys / secondary_keys
+  const pickKeys = (a, b) => {
+    const value = Array.isArray(a) ? a : Array.isArray(b) ? b : typeof a === 'string' ? [a] : [];
+    return value
+      .filter((k) => typeof k === 'string' && k.trim())
+      .map((k) => k.trim().slice(0, 200))
+      .slice(0, MAX_WORLDBOOK_KEYS);
+  };
+
+  const keys = pickKeys(r.keys, r.key);
+  const secondaryKeys = pickKeys(r.secondary_keys, r.keysecondary);
+  const content = str(r.content, MAX_WORLDBOOK_CONTENT);
+  // 内容为空、又没有任何关键词的条目没有任何作用，直接丢掉
+  if (!content.trim() && !keys.length) return null;
+
+  const logic = String(r.selectiveLogic || r.selective_logic || '').toUpperCase();
+  const selectiveLogic = ['AND_ANY', 'AND_ALL', 'NOT_ANY', 'NOT_ALL'].includes(logic) ? logic : 'AND_ANY';
+
+  let probability = Number(r.probability);
+  if (!isFinite(probability)) probability = 100;
+  probability = Math.max(0, Math.min(100, probability));
+
+  let order = Number(r.order);
+  if (!isFinite(order)) order = 100;
+
+  // 酒馆新版本用 enabled，老版本/部分导出工具用 disable（true = 停用）。
+  // 两个都认，否则导入老世界书时停用的条目会全部复活。
+  const enabled =
+    typeof r.enabled === 'boolean' ? r.enabled : r.disable === true ? false : true;
+
+  return {
+    id: typeof r.id === 'string' && r.id ? r.id : `e${Math.random().toString(36).slice(2, 10)}`,
+    // comment 是酒馆里的条目备注；没有就退回首关键词，方便在界面里认出来
+    title: str(r.title || r.comment, 200).trim() || keys[0] || '未命名条目',
+    keys,
+    secondaryKeys,
+    selectiveLogic,
+    content,
+    order,
+    // 蓝圈：无条件注入，不需要关键词
+    constant: r.constant === true || r.strategy === 'constant',
+    // 酒馆默认开启「全词匹配」，但官方文档明确说这对中日文有害（不用空格分词），
+    // 所以这里默认关闭，只有显式打开才启用。
+    matchWholeWords: bool(r.matchWholeWords ?? r.match_whole_words, false),
+    caseSensitive: bool(r.caseSensitive ?? r.case_sensitive, false),
+    probability,
+    enabled
+  };
+}
+
+/** 世界书的条目列表：可能是数组，也可能是酒馆导出时那种以索引为键的对象 */
+function worldbookEntryList(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== 'object') return [];
+
+  const values = Object.values(raw);
+  // 对象形式：{ "0": {...}, "1": {...} }。
+  // 只认「所有值都是对象」的情况，免得把单个 entry 误当成一本书。
+  if (values.length && values.every((v) => v && typeof v === 'object' && !Array.isArray(v))) {
+    return values;
+  }
+  return [];
+}
+
+/** 把世界书（数组或带 entries 的对象）整理成内部格式 */
+function normalizeWorldbook(raw, fallbackName) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const rawEntries = Array.isArray(raw) ? raw : worldbookEntryList(r.entries);
+  const name =
+    String(r.name || r.title || (typeof fallbackName === 'string' ? fallbackName : '') || '').trim() || '未命名世界书';
+
+  const entries = [];
+  for (const item of rawEntries) {
+    const entry = normalizeWorldbookEntry(item);
+    if (entry) entries.push(entry);
+    if (entries.length >= MAX_WORLDBOOK_ENTRIES) break;
+  }
+
+  return {
+    id: typeof r.id === 'string' && r.id ? r.id : newWorldbookId(),
+    name: name.slice(0, 120),
+    entries,
+    createdAt: Number(r.createdAt) || Date.now(),
+    updatedAt: Number(r.updatedAt) || Date.now()
+  };
+}
+
+function loadWorldbooks() {
+  const data = loadJsonWithFallback(worldbooksFile());
+  if (!data || !Array.isArray(data.worldbooks)) return { worldbooks: [] };
+  // 保留最近的若干本，防止无限增长
+  const list = data.worldbooks.slice(-MAX_WORLDBOOKS);
+  return { worldbooks: list.map((w) => normalizeWorldbook(w)) };
+}
+
+function saveWorldbooks(payload, options) {
+  const opts = options || {};
+  const list = payload && Array.isArray(payload.worldbooks) ? payload.worldbooks : [];
+  const data = { worldbooks: list.slice(-MAX_WORLDBOOKS).map((w) => normalizeWorldbook(w)) };
+
+  if (opts.immediate) {
+    writeJsonNow(worldbooksFile(), data);
+  } else {
+    writeJson(worldbooksFile(), data);
+  }
+  return data;
+}
+
+/**
+ * 角色卡里内嵌的世界书。
+ * ST 导出角色卡时会把「角色绑定的世界书」一起塞进 character_book，
+ * 以前这里会被整个丢掉，现在转换成一个独立世界书，并返回给调用方去落盘 + 绑定。
+ */
+function worldbookFromCharacterBook(raw, characterName) {
+  if (!raw || typeof raw !== 'object') return null;
+  const book = normalizeWorldbook(raw, `${characterName || '角色'}的世界书`);
+  // 一个条目都没有就没必要存一份空世界书
+  if (!book.entries.length) return null;
+  return book;
+}
+
+/** 把单独的 lorebook 文件（`{entries:[...]}` 或裸数组）转成世界书 */
+function worldbookFromLorebook(raw, fallbackName) {
+  if (!raw || typeof raw !== 'object') return null;
+  const book = normalizeWorldbook(raw, fallbackName);
+  if (!book.entries.length) return null;
+  return book;
+}
+
+// --- 匹配引擎 -------------------------------------------------------------
+
+/**
+ * 关键词是否命中。
+ * 中日韩文字没有空格分词，只能做子串匹配（酒馆自己也建议这时关掉全词匹配）；
+ * 纯拉丁字母的关键词才用词边界，避免 king 命中 liking。
+ */
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 编译过的关键词正则缓存。
+ * 匹配是每轮对每个条目每个关键词都跑的，不缓存的话每句话都要重新编译几百次正则。
+ * 用户改关键词时字符串会变，键自然失配，所以不用担心缓存过期。
+ */
+const keywordRegexCache = new Map();
+const MAX_KEYWORD_REGEX_CACHE = 4000;
+
+/** 解析 /re/flags 写法；不是正则就返回 null */
+function parseRegexKeyword(keyword) {
+  if (keyword.length <= 2 || !keyword.startsWith('/')) return null;
+
+  const cached = keywordRegexCache.get(keyword);
+  if (cached !== undefined) return cached;
+
+  let compiled = null;
+  const lastSlash = keyword.lastIndexOf('/');
+  if (lastSlash > 0) {
+    const body = keyword.slice(1, lastSlash);
+    const flags = keyword.slice(lastSlash + 1);
+    if (/^[gimsuy]*$/.test(flags)) {
+      try {
+        compiled = new RegExp(body, flags);
+      } catch (err) {
+        // 正则写错了就当普通文本处理，别让一条坏正则废掉整本书
+        compiled = null;
+      }
+    }
+  }
+
+  // 上限只是防止畸形文件把缓存撑爆；简单粗暴地整体清空即可
+  if (keywordRegexCache.size >= MAX_KEYWORD_REGEX_CACHE) keywordRegexCache.clear();
+  keywordRegexCache.set(keyword, compiled);
+  return compiled;
+}
+
+/** 全词匹配的正则同样值得缓存（中文默认不走这条，主要是英文世界书） */
+const wordBoundaryCache = new Map();
+
+function wordBoundaryRegex(keyword) {
+  const cached = wordBoundaryCache.get(keyword);
+  if (cached !== undefined) return cached;
+
+  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(keyword)}(?![\\p{L}\\p{N}])`, 'u');
+  if (wordBoundaryCache.size >= MAX_KEYWORD_REGEX_CACHE) wordBoundaryCache.clear();
+  wordBoundaryCache.set(keyword, re);
+  return re;
+}
+
+function keywordHit(haystack, rawKeyword, entry) {
+  const keyword = String(rawKeyword || '').trim();
+  if (!keyword) return false;
+
+  // 关键词写成 /re/flags 就当正则处理，和酒馆一致
+  const asRegex = parseRegexKeyword(keyword);
+  if (asRegex) return asRegex.test(haystack);
+
+  const text = entry && entry.caseSensitive ? haystack : haystack.toLowerCase();
+  const needle = entry && entry.caseSensitive ? keyword : keyword.toLowerCase();
+
+  if (CJK_RE.test(needle)) return text.includes(needle);
+  if (entry && entry.matchWholeWords) return wordBoundaryRegex(needle).test(text);
+  return text.includes(needle);
+}
+
+/** 把某条目的所有关键词拼成一个正则，用来判断「至少命中一个」还是「全部命中」 */
+function anyKeywordHit(haystack, keywords, entry) {
+  return keywords.some((k) => keywordHit(haystack, k, entry));
+}
+
+function allKeywordsHit(haystack, keywords, entry) {
+  return keywords.length > 0 && keywords.every((k) => keywordHit(haystack, k, entry));
+}
+
+/** 单条 entry 是否应该被注入 */
+function entryMatches(entry, haystack) {
+  if (!entry || entry.enabled === false) return false;
+  if (!String(entry.content || '').trim()) return false;
+
+  // constant（蓝圈）不需要关键词，永远注入
+  if (entry.constant) return true;
+  if (!entry.keys.length) return false;
+
+  // 触发概率：100 必中，50 一半概率，0 等于停用
+  if (entry.probability < 100 && Math.random() * 100 >= entry.probability) return false;
+
+  if (!anyKeywordHit(haystack, entry.keys, entry)) return false;
+
+  // 附加过滤词（secondary keys）
+  if (entry.secondaryKeys.length) {
+    const any = anyKeywordHit(haystack, entry.secondaryKeys, entry);
+    const all = allKeywordsHit(haystack, entry.secondaryKeys, entry);
+    switch (entry.selectiveLogic) {
+      case 'AND_ALL':
+        if (!all) return false;
+        break;
+      case 'NOT_ANY':
+        if (any) return false;
+        break;
+      case 'NOT_ALL':
+        if (all) return false;
+        break;
+      case 'AND_ANY':
+      default:
+        if (!any) return false;
+        break;
+    }
+  }
+
+  return true;
+}
+
+/** 一组世界书 id 对应的全部条目（去重，同一个 id 只取一次） */
+function worldbookEntriesByIds(ids) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && id.trim()))];
+  if (!wanted.length) return [];
+
+  const { worldbooks } = loadWorldbooks();
+  const byId = new Map(worldbooks.map((w) => [w.id, w]));
+
+  const entries = [];
+  for (const bookId of wanted) {
+    const book = byId.get(bookId);
+    if (!book) continue;
+    for (const entry of book.entries) {
+      entries.push({ ...entry, worldbookId: book.id, worldbookName: book.name });
+    }
+  }
+  return entries;
+}
+
+/** 一个角色绑定的全部世界书条目 */
+function worldbookEntriesForCharacter(characterId, store) {
+  const id = String(characterId || '').trim();
+  if (!id) return [];
+
+  const data = store || loadCharacters();
+  const character = data.characters.find((c) => c.id === id);
+  if (!character || !character.worldbookIds.length) return [];
+
+  return worldbookEntriesByIds(character.worldbookIds);
+}
+
+/**
+ * 扫描近期对话，返回命中的世界书条目（按 order 升序，大的更靠后 = 影响更大）。
+ * scanDepth 是往回扫多少条消息，和酒馆的 Scan Depth 一个意思。
+ */
+function matchWorldbookEntries(entries, scanText) {
+  const hits = [];
+  for (const entry of entries) {
+    if (entryMatches(entry, scanText)) hits.push(entry);
+  }
+  hits.sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order;
+    return String(a.title).localeCompare(String(b.title));
+  });
+  return hits;
+}
+
+/** 命中条目拼成注入块 */
+function formatWorldbookSection(hits) {
+  if (!hits.length) return '';
+  const lines = hits.map((e) => `【${e.title}】\n${String(e.content).trim()}`);
+  return `[世界设定]\n以下资料与当前对话相关，请自然地运用，不要直接复述：\n\n${lines.join('\n\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,27 +1458,89 @@ function registerIpc() {
     saveCharacters(payload, { immediate: true });
   });
 
+  // --- 世界书 ---
+
+  ipcMain.handle('worldbooks:get', () => loadWorldbooks());
+
+  ipcMain.handle('worldbooks:save', (_event, payload) => saveWorldbooks(payload));
+
+  ipcMain.on('worldbooks:save-sync', (_event, payload) => {
+    saveWorldbooks(payload, { immediate: true });
+  });
+
   /**
-   * 导入角色卡：弹出文件选择框，把选中的 PNG / JSON 解析成角色对象返回。
+   * 世界书预览：按当前会话的近期消息跑一遍匹配，返回命中的条目。
+   * 作用域是「会话绑定的 + 角色绑定的」两批合起来 —— 会话级在前，
+   * 和酒馆的 Chat Lore 一个思路：会话自己选的设定优先于角色自带的。
+   * 界面用它显示「这一轮会注入哪些设定」，也方便排查关键词写没写对。
+   */
+  ipcMain.handle('worldbooks:preview', (_event, payload) => {
+    const request = payload || {};
+    const characterId = String(request.characterId || '').trim();
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+
+    // 只取 role/content 参与匹配，和真实请求时的扫描范围保持一致
+    let scanDepth = Number(request.scanDepth);
+    if (!isFinite(scanDepth) || scanDepth <= 0) scanDepth = 6;
+    scanDepth = Math.min(50, Math.floor(scanDepth));
+
+    const usable = messages.filter(
+      (m) => m && typeof m.content === 'string' && String(m.content).trim()
+    );
+    const scanText = usable
+      .slice(-scanDepth)
+      .map((m) => String(m.content))
+      .join('\n');
+
+    // 会话级世界书在前，角色级在后；两边都绑了同一本只会出现一次
+    const convoIds = Array.isArray(request.worldbookIds) ? request.worldbookIds : [];
+    const charEntries = worldbookEntriesForCharacter(characterId);
+    const convoEntries = worldbookEntriesByIds(convoIds);
+
+    // 会话里已经出现的世界书，从角色那批里去掉，避免同一本书注入两遍
+    const convoBookIds = new Set(convoEntries.map((e) => e.worldbookId));
+    const entries = [...convoEntries, ...charEntries.filter((e) => !convoBookIds.has(e.worldbookId))];
+
+    const hits = matchWorldbookEntries(entries, scanText);
+
+    return {
+      total: entries.length,
+      scanDepth,
+      hits: hits.map((e) => ({
+        id: e.id,
+        title: e.title,
+        worldbookName: e.worldbookName,
+        order: e.order,
+        length: String(e.content).length
+      })),
+      section: formatWorldbookSection(hits)
+    };
+  });
+
+  /**
+   * 导入角色卡 / 世界书：弹出文件选择框，把选中的 PNG / JSON 解析出来返回。
    * 这里只解析不落盘 —— 由界面决定要不要收下，用户取消时什么都不会变。
+   * 角色卡里内嵌的世界书（character_book）会一起解析出来，
+   * 并把它的 id 写进角色的 worldbookIds，这样导入后世界书直接就是绑好的。
    */
   ipcMain.handle('characters:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择角色卡',
+      title: '选择角色卡或世界书',
       buttonLabel: '导入',
       properties: ['openFile', 'multiSelections'],
       filters: [
-        { name: '角色卡（PNG / JSON）', extensions: ['png', 'json'] },
+        { name: '角色卡 / 世界书（PNG / JSON）', extensions: ['png', 'json'] },
         { name: '酒馆 PNG 角色卡', extensions: ['png'] },
-        { name: 'JSON 角色卡', extensions: ['json'] }
+        { name: 'JSON 角色卡 / 世界书', extensions: ['json'] }
       ]
     });
 
     if (result.canceled || !result.filePaths.length) {
-      return { canceled: true, characters: [], errors: [] };
+      return { canceled: true, characters: [], worldbooks: [], errors: [] };
     }
 
     const characters = [];
+    const worldbooks = [];
     const errors = [];
 
     for (const file of result.filePaths) {
@@ -1151,17 +1578,32 @@ function registerIpc() {
         }
 
         const character = characterFromCard(card, avatar, ext === '.png' ? 'png' : 'json', fallbackName);
+
         if (!character) {
-          errors.push(`${base}：解析失败`);
+          // 不是角色卡，那就试试当成独立的世界书文件（酒馆的 lorebook JSON）
+          const book = worldbookFromLorebook(card, fallbackName);
+          if (book) {
+            worldbooks.push(book);
+            continue;
+          }
+          errors.push(`${base}：解析失败，既不是角色卡也不是世界书`);
           continue;
         }
+
+        // 内嵌世界书：给它一个正式 id，并自动绑到这个角色上
+        if (character.worldbook) {
+          const book = { ...character.worldbook, id: newWorldbookId() };
+          worldbooks.push(book);
+          character.worldbookIds = [book.id];
+        }
+        delete character.worldbook;
         characters.push(character);
       } catch (err) {
         errors.push(`${base}：${(err && err.message) || '读取失败'}`);
       }
     }
 
-    return { canceled: false, characters, errors };
+    return { canceled: false, characters, worldbooks, errors };
   });
 
   /**

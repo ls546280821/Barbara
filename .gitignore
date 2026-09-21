@@ -1,6 +1,10 @@
 # 依赖
 node_modules/
 
+# 安装依赖时使用的本地缓存（沙箱/镜像安装会产生）
+.npm-cache/
+.electron-cache/
+
 # 打包输出（electron-builder 默认目录）
 dist/
 out/
