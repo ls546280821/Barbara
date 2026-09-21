@@ -48,11 +48,28 @@
         <div class="topbar-actions">
           <select id="character-switch" class="model-switch char-switch" title="切换当前会话扮演的角色" aria-label="切换角色"></select>
           <select id="model-switch" class="model-switch" title="切换当前会话使用的模型" aria-label="切换模型"></select>
+          <button id="btn-perspective" class="btn btn-ghost btn-sm" aria-label="打开视角设置">视角</button>
+          <button id="btn-panel-toggle" class="btn btn-ghost btn-sm hidden" aria-label="展开或收起状态面板" aria-expanded="false">状态</button>
           <button id="btn-copy-all" class="btn btn-ghost btn-sm" aria-label="复制整段对话">复制全文</button>
           <button id="btn-clear" class="btn btn-ghost btn-sm" aria-label="清空当前对话">清空对话</button>
           <button id="btn-stop" class="btn btn-danger btn-sm hidden" aria-label="停止生成回复">停止生成</button>
         </div>
       </header>
+
+      <!-- 状态面板：世界模型的状态栏，可折叠，字段值可直接改 -->
+      <section id="panel-box" class="panel-box hidden" aria-label="当前状态面板">
+        <div class="panel-head">
+          <span class="panel-title">当前状态</span>
+          <span id="panel-hint" class="panel-hint">每轮自动更新</span>
+          <button id="btn-panel-reset" class="btn btn-ghost btn-sm" type="button" title="清空面板（下一条带状态栏的回复会重新建立）">重置</button>
+          <button id="btn-panel-close" class="icon-btn icon-btn-sm" type="button" title="收起" aria-label="收起状态面板">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div id="panel-fields" class="panel-fields"></div>
+      </section>
 
       <section id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></section>
 
@@ -517,6 +534,66 @@
         <span id="wb-foot-hint" class="foot-hint">世界书只保存在你自己电脑上</span>
         <div class="foot-actions">
           <button id="btn-close-worldbooks-2" class="btn btn-ghost" type="button">关闭</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 视角设置弹窗 ================= -->
+  <div id="perspective-modal" class="modal hidden">
+    <div class="modal-card perspective-card" role="dialog" aria-modal="true" aria-labelledby="perspective-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="perspective-title">视角设置</h2>
+          <p class="modal-sub">决定 AI 用什么角度看这个世界；设置跟着会话走</p>
+        </div>
+        <button id="btn-close-perspective" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭视角设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body">
+        <label class="field field-stack">
+          <span class="field-label">叙述模式</span>
+          <select id="p-narration" aria-label="叙述模式">
+            <option value="standard">标准 —— 只写对话和动作</option>
+            <option value="inner">内心描写 —— 每轮附上角色的真实心理</option>
+            <option value="god">上帝视角 —— 正文 + 心理 + 旁白</option>
+            <option value="custom">自定义 —— 自己写要求</option>
+          </select>
+          <span class="field-help">
+            选好后会自动把格式要求加进提示词。「【心理】」「【旁白】」会被渲染成独立样式块，
+            和正文区分开。
+          </span>
+        </label>
+
+        <label id="p-custom-wrap" class="field field-stack hidden">
+          <span class="field-label">自定义叙述要求</span>
+          <textarea id="p-custom" rows="5" spellcheck="false" placeholder="例如：每次回复先用一段环境描写开场，再写对话，最后用「【心理】」写主角的内心活动。"></textarea>
+        </label>
+
+        <label class="check">
+          <input id="p-gm" type="checkbox" />
+          <span class="check-text">
+            <span class="check-title">GM 模式（主持人视角）</span>
+            <span class="check-desc">
+              开启后 AI 扮演整个世界和所有 NPC，用第三人称描写环境，你是故事主角。<br />
+              适合大世界模型：关掉时 AI 只会扮演单个角色，被「始终以第一人称」限制住。
+            </span>
+          </span>
+        </label>
+
+        <p class="field-help perspective-note">
+          两种设置都会写进发给模型的消息里，<strong>不影响已经生成的回答</strong>；改完从下一条回复开始生效。
+        </p>
+      </div>
+
+      <footer class="modal-foot">
+        <span class="foot-hint">设置跟着当前会话保存</span>
+        <div class="foot-actions">
+          <button id="btn-close-perspective-2" class="btn btn-ghost" type="button">关闭</button>
         </div>
       </footer>
     </div>

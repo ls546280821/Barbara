@@ -38,6 +38,22 @@ const el = {
   providerPresets: $('provider-presets'),
   modelSwitch: $('model-switch'),
   characterSwitch: $('character-switch'),
+  // 状态面板
+  panelBox: $('panel-box'),
+  panelFields: $('panel-fields'),
+  panelHint: $('panel-hint'),
+  btnPanelToggle: $('btn-panel-toggle'),
+  btnPanelClose: $('btn-panel-close'),
+  btnPanelReset: $('btn-panel-reset'),
+  // 视角设置
+  btnPerspective: $('btn-perspective'),
+  perspectiveModal: $('perspective-modal'),
+  btnClosePerspective: $('btn-close-perspective'),
+  btnClosePerspective2: $('btn-close-perspective-2'),
+  pNarration: $('p-narration'),
+  pCustomWrap: $('p-custom-wrap'),
+  pCustom: $('p-custom'),
+  pGm: $('p-gm'),
   confirmModal: $('confirm-modal'),
   confirmTitle: $('confirm-title'),
   confirmMessage: $('confirm-message'),
@@ -801,6 +817,17 @@ function renderHeader() {
   const wbCount = effectiveWorldbookCount(convo);
   if (wbCount) el.convoMeta.textContent += ` · 世界书 ${wbCount} 本`;
 
+  // 视角：只在偏离默认（标准 + 非 GM）时提示，平时不占位置
+  const viewTags = [];
+  if (isGmMode(convo)) viewTags.push('GM 模式');
+  if (convoIsCustomNarration(convo)) {
+    if (String(convo.customNarration || '').trim()) viewTags.push('自定义叙述');
+  } else {
+    const mode = convoNarrationMode(convo);
+    if (mode !== DEFAULT_NARRATION_MODE) viewTags.push(NARRATION_MODES[mode].label);
+  }
+  if (viewTags.length) el.convoMeta.textContent += ` · ${viewTags.join(' + ')}`;
+
   el.hintText.textContent = settings.sendOnEnter === false
     ? 'Ctrl + Enter 发送 · Enter 换行'
     : 'Enter 发送 · Shift + Enter 换行';
@@ -1143,6 +1170,8 @@ function renderAll(options) {
   renderHeader();
   renderCharacterSwitch();
   renderModelSwitch();
+  syncPanelVisibilityForConvo(activeConvo());
+  renderPanel();
   renderMessages(options);
 }
 
@@ -1162,7 +1191,15 @@ function createConvo(activate) {
     messages: [],
     characterId: source ? source.characterId || null : null,
     // 会话自己绑的世界书。角色自带的世界书仍然生效，两边会合并。
-    worldbookIds: []
+    worldbookIds: [],
+    // 状态面板：fields 是出现过的字段顺序，panel 是当前值。
+    // 世界模型开局通常是空的，第一条带面板的回复会自动填上。
+    panel: {},
+    panelFields: [],
+    // 视角设置：叙述模式（标准/内心描写/上帝视角/自定义）和 GM 模式
+    narrationMode: DEFAULT_NARRATION_MODE,
+    customNarration: '',
+    gmMode: false
   };
   state.conversations.unshift(convo);
   if (activate !== false) state.activeId = convo.id;
@@ -1266,6 +1303,471 @@ async function removeMessage(index) {
 }
 
 // ---------------------------------------------------------------------------
+//  状态面板（世界模型的状态栏）
+//
+//  模型每轮输出一段固定格式的状态栏，比如：
+//      【金币】：100
+//      【时间】：早上
+//      【健康状态】：健康
+//  把它交给模型自己「抄上一轮」是靠不住的 —— 历史会被 maxTurns 截断，
+//  一旦截出去模型就开始编数值。所以这里把它解析出来存到会话上，
+//  每轮由程序权威注入，数值就不会漂了。
+// ---------------------------------------------------------------------------
+
+// 字段行：全角/半角冒号都认。字段名限制在 24 字内，避免把长句子误当成字段。
+const PANEL_LINE_RE = /^【([^】\n]{1,24})】[：:]\s*(.*)$/;
+// 单行最长长度：面板行都是「字段：短值」，超长的更像正文
+const PANEL_LINE_MAX = 200;
+// 还没有已知字段时，值超过这个长度就不认为是面板（首次扫描的兜底判断）
+const PANEL_GUESS_VALUE_MAX = 60;
+
+// 明确不当面板的字段名：这些是我们自己注入的提示词段落，或消息渲染用的标记
+const PANEL_RESERVED = new Set([
+  '心理', '内心', '心声', '旁白', '上帝视角', '全知',
+  '扮演规则', '主持规则', '当前场景', '世界设定', '参考信息', '叙述要求'
+]);
+
+const DEFAULT_NARRATION_MODE = 'standard';
+// 自定义叙述模式的最大长度，防止把整篇提示词塞进来
+const MAX_CUSTOM_NARRATION = 2000;
+const MAX_PANEL_FIELDS = 120;
+
+function panelFieldAllowed(name) {
+  return !PANEL_RESERVED.has(name) && !name.includes('的设定') && !name.includes('的性格');
+}
+
+/**
+ * 从一段文本里抽出面板字段（保持出现顺序）。
+ *
+ * knownFields：已经确立的字段名。给了它就以它为准 —— 正文里出现的
+ * 「【某某】：……」不会被误收。只有第一次扫（还没有已知字段）时才靠
+ * 形态猜测，这时候用「值很短」这个条件兜一下，避免把整段正文当面板。
+ */
+function extractPanelFromText(text, knownFields) {
+  const known = knownFields && knownFields.length ? new Set(knownFields) : null;
+  const found = new Map();
+
+  for (const rawLine of String(text || '').split('\n')) {
+    const line = rawLine.trim().replace(/^[-*+]\s+/, '');
+    if (line.length > PANEL_LINE_MAX) continue;
+
+    const m = line.match(PANEL_LINE_RE);
+    if (!m) continue;
+
+    const name = m[1].trim();
+    if (!name || !panelFieldAllowed(name)) continue;
+
+    const value = m[2].trim();
+
+    // 已知字段直接收；未知字段只在首次扫描时按形态判断
+    if (!known && value.length > PANEL_GUESS_VALUE_MAX) continue;
+    if (known && !known.has(name) && value.length > PANEL_GUESS_VALUE_MAX) continue;
+
+    found.set(name, value.slice(0, 500));
+    if (found.size >= MAX_PANEL_FIELDS) break;
+  }
+
+  return found;
+}
+
+/**
+ * 从一段文本里剥掉面板行。
+ * 面板由程序权威注入，历史里再留一份只会白烧 token，还可能和注入值冲突。
+ * 传了 knownFields 就只剥那些字段（正文里提到同名字样不会被误删）。
+ */
+function stripPanelLines(text, knownFields) {
+  const source = String(text || '');
+  if (!source.trim()) return source;
+
+  const known = knownFields && knownFields.length ? new Set(knownFields) : null;
+
+  const out = source
+    .split('\n')
+    .filter((rawLine) => {
+      const line = rawLine.trim().replace(/^[-*+]\s+/, '');
+      if (line.length > PANEL_LINE_MAX) return true;
+
+      const m = line.match(PANEL_LINE_RE);
+      if (!m) return true;
+
+      const name = m[1].trim();
+      if (!name || !panelFieldAllowed(name)) return true;
+
+      if (known) return !known.has(name);
+
+      // 没有已知字段（首轮）时保守一点：只剥「短值」的面板行
+      return m[2].trim().length > PANEL_GUESS_VALUE_MAX;
+    });
+
+  return collapseBlankLines(out.join('\n')).trim();
+}
+
+/** 连续空行压成一个，去掉首尾空白（剥面板后容易留下空格） */
+function collapseBlankLines(text) {
+  return String(text || '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+function convoPanelFields(convo) {
+  return convo && Array.isArray(convo.panelFields) ? convo.panelFields : [];
+}
+
+function convoPanel(convo) {
+  return convo && convo.panel && typeof convo.panel === 'object' ? convo.panel : {};
+}
+
+/**
+ * 把会话历史里出现过的面板字段同步到 convo.panel。
+ * 取「最近一条提到该字段的助手消息」的值，所以手动改过的旧轮次会被更新的值覆盖。
+ * 返回是否发生了变化 —— 调用方据此决定要不要重绘面板。
+ */
+function syncConvoPanel(convo) {
+  if (!convo || !Array.isArray(convo.messages)) return false;
+
+  const beforeFields = convoPanelFields(convo).join('\u0001');
+  const beforePanel = JSON.stringify(convoPanel(convo));
+
+  // 先按出现顺序收集字段名：从最早的消息往后扫，后面的同名不重复加。
+  // 每扫到新字段就并进 known —— 这样后期扫描不再依赖形态猜测，
+  // 正文里的「【某某】：长句」不会被误收。
+  const order = [];
+  const latest = new Map();
+  const known = new Set();
+
+  for (const msg of convo.messages) {
+    if (!msg || msg.role !== 'assistant') continue;
+    const content = String(msg.content || '');
+    if (!content.includes('【')) continue;
+
+    const found = extractPanelFromText(content, [...known]);
+    for (const [name, value] of found) {
+      if (!order.includes(name)) {
+        order.push(name);
+        known.add(name);
+      }
+      latest.set(name, value);
+    }
+  }
+
+  if (order.length > MAX_PANEL_FIELDS) order.length = MAX_PANEL_FIELDS;
+
+  const panel = {};
+  for (const name of order) {
+    const value = latest.get(name);
+    if (value !== undefined) panel[name] = value;
+  }
+
+  convo.panelFields = order;
+  convo.panel = panel;
+
+  return beforeFields !== order.join('\u0001') || beforePanel !== JSON.stringify(panel);
+}
+
+/** 手动改一个字段的值（面板 UI 里直接编辑） */
+function setPanelField(convo, name, value) {
+  if (!convo) return;
+  const fields = [...convoPanelFields(convo)];
+  if (!fields.includes(name)) fields.push(name);
+  convo.panelFields = fields.slice(0, MAX_PANEL_FIELDS);
+  convo.panel = { ...convoPanel(convo), [name]: String(value || '').slice(0, 500) };
+  convo.updatedAt = now();
+  persistConversations(0);
+}
+
+/** 面板拼成注入块；没有面板就返回空串 */
+function formatPanelForPrompt(convo) {
+  const fields = convoPanelFields(convo);
+  if (!fields.length) return '';
+
+  const panel = convoPanel(convo);
+  const lines = [];
+  for (const name of fields) {
+    const value = panel[name];
+    if (value === undefined || value === '') continue;
+    lines.push(`【${name}】：${value}`);
+  }
+  if (!lines.length) return '';
+
+  return (
+    '[当前状态]\n' +
+    '这是本局当前的权威状态，请以它为准，不要自行改动历史数值。\n' +
+    '每次回复末尾按同样的格式输出更新后的完整状态栏；没有变化的字段照抄。\n\n' +
+    lines.join('\n')
+  );
+}
+
+// ---------------------------------------------------------------------------
+//  叙述模式 / GM 模式
+//  两者都是「改变模型看这个世界的视角」，所以放一起。
+// ---------------------------------------------------------------------------
+
+const NARRATION_MODES = {
+  standard: {
+    label: '标准',
+    hint: '只写对话和动作',
+    text: ''
+  },
+  inner: {
+    label: '内心描写',
+    hint: '每轮附上角色的真实心理',
+    text:
+      '【叙述要求】\n' +
+      '每次回复在正文之外，单独起一段写角色的真实心理，以「【心理】」开头。\n' +
+      '写角色嘴上没说出口的想法和情绪。这段是给读者看的旁白，角色本人看不到，' +
+      '也不要让角色对它作出反应。'
+  },
+  god: {
+    label: '上帝视角',
+    hint: '正文 + 心理 + 旁白',
+    text:
+      '【叙述要求】\n' +
+      '每次回复包含三部分，各自单独成段：\n' +
+      '1. 正文：角色的对话与动作。\n' +
+      '2. 以「【心理】」开头：该角色此刻真实的内心活动，包括没说出口的部分。\n' +
+      '3. 以「【旁白】」开头：以全知视角补充环境细节、在场其他人的反应或后续走向。\n' +
+      '「【心理】」和「【旁白】」都是给读者看的，角色本人看不到，不要让角色对它们作出反应。'
+  }
+};
+
+function convoNarrationMode(convo) {
+  const mode = convo && convo.narrationMode;
+  return Object.prototype.hasOwnProperty.call(NARRATION_MODES, mode) ? mode : DEFAULT_NARRATION_MODE;
+}
+
+/** 自定义模式：用户自己写要求，存成 convo.customNarration */
+function convoIsCustomNarration(convo) {
+  return !!(convo && convo.narrationMode === 'custom');
+}
+
+function narrationInstruction(convo) {
+  if (convoIsCustomNarration(convo)) {
+    const custom = String((convo && convo.customNarration) || '').trim().slice(0, MAX_CUSTOM_NARRATION);
+    if (!custom) return '';
+    return `【叙述要求】\n${custom}`;
+  }
+  return NARRATION_MODES[convoNarrationMode(convo)].text;
+}
+
+function isGmMode(convo) {
+  return !!(convo && convo.gmMode === true);
+}
+
+function roleplayRuleText(charName, me) {
+  return (
+    `【扮演规则】\n` +
+    `你现在要扮演「${charName}」。请始终以第一人称，用 ${charName} 的语气、性格和说话习惯回应，` +
+    `保持人设前后一致，不要跳出角色，也不要提到自己是 AI、语言模型或助手。` +
+    `把对方称作「${me}」。用动作或神态描写时放在括号里。`
+  );
+}
+
+/**
+ * GM（主持人）规则。
+ * 世界模型里模型扮演的是「整个世界和所有 NPC」，主角是玩家。
+ * 所以必须明确允许第三人称、多 NPC 视角 —— 这正是角色扮演规则里禁止的事。
+ */
+function gmRuleText(charName, me) {
+  return (
+    `【主持规则】\n` +
+    `你是这个世界的叙述者，负责描写环境、推进情节，并扮演其中的所有 NPC。\n` +
+    `把「${me}」当作故事的主角，用第二人称称呼对方。\n` +
+    `用第三人称描写环境和 NPC；不同 NPC 要有各自的语气和立场，不要让所有人用同一种腔调说话。\n` +
+    `每次回复都要给出具体的情景与可选择的行动方向，让故事能继续推进。\n` +
+    `不要提到自己是 AI、语言模型或助手。`
+  );
+}
+
+// ---------------------------------------------------------------------------
+//  状态面板 UI
+// ---------------------------------------------------------------------------
+
+let panelVisible = false; // 面板展开状态（当前会话）
+let panelVisibilityConvoId = null; // 上面这个状态属于哪个会话
+let panelFieldCountSeen = 0; // 上次同步时面板有几个字段
+
+/**
+ * 面板展开状态的同步规则：
+ *   · 切到别的会话 —— 有面板就展开，没面板就收起
+ *   · 同一会话里面板第一次出现（比如第一轮回复才带出状态栏）—— 自动展开一次
+ *   · 其余情况一律不动，尊重用户手动收起
+ *
+ * 不能每次重绘都按「有没有面板」重算：流式输出期间 renderAll 会被频繁调用，
+ * 那样会把用户手动收起的面板又弹开。
+ */
+function syncPanelVisibilityForConvo(convo) {
+  const id = convo ? convo.id : null;
+  const count = convoPanelFields(convo).length;
+
+  if (id !== panelVisibilityConvoId) {
+    panelVisibilityConvoId = id;
+    panelFieldCountSeen = count;
+    panelVisible = count > 0;
+    return;
+  }
+
+  // 切会话已经处理过；这里只管「面板从无到有」这一个转换
+  if (count > 0 && panelFieldCountSeen === 0) {
+    panelVisible = true;
+  }
+  panelFieldCountSeen = count;
+}
+
+function currentPanelTextarea() {
+  const active = document.activeElement;
+  if (active && active.classList && active.classList.contains('panel-value')) {
+    return { name: active.dataset.field, node: active };
+  }
+  return null;
+}
+
+/** 面板行的值改成单行输入框，边打字边存（防抖） */
+function attachPanelEditor(convo, name, input) {
+  input.addEventListener('input', () => {
+    clearTimeout(input._panelTimer);
+    input._panelTimer = setTimeout(() => {
+      setPanelField(convo, name, input.value);
+      renderHeader();
+    }, 400);
+  });
+  // 失焦立即落盘，避免切换会话时丢掉最后几个字
+  input.addEventListener('blur', () => {
+    clearTimeout(input._panelTimer);
+    setPanelField(convo, name, input.value);
+  });
+}
+
+function renderPanel() {
+  const convo = activeConvo();
+  const fields = convo ? convoPanelFields(convo) : [];
+  const hasPanel = fields.length > 0;
+
+  el.btnPanelToggle.classList.toggle('hidden', !hasPanel);
+  el.panelBox.classList.toggle('hidden', !hasPanel || !panelVisible);
+
+  if (!hasPanel) {
+    el.panelFields.innerHTML = '';
+    el.btnPanelToggle.setAttribute('aria-expanded', 'false');
+    return;
+  }
+
+  el.btnPanelToggle.setAttribute('aria-expanded', panelVisible ? 'true' : 'false');
+
+  const panel = convoPanel(convo);
+  const filled = fields.filter((n) => String(panel[n] || '').trim()).length;
+  el.panelHint.textContent = `${filled}/${fields.length} 项已填`;
+
+  // 面板里某个输入框正在编辑时不要重建 DOM，否则光标和输入内容会被打断
+  const editing = currentPanelTextarea();
+  if (editing && el.panelFields.querySelector(`[data-field="${CSS.escape(editing.name)}"]`)) return;
+
+  el.panelFields.innerHTML = '';
+
+  for (const name of fields) {
+    const row = document.createElement('div');
+    row.className = 'panel-row';
+
+    const label = document.createElement('span');
+    label.className = 'panel-name';
+    label.textContent = name;
+    label.title = name;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'panel-value';
+    input.dataset.field = name;
+    input.value = panel[name] || '';
+    input.spellcheck = false;
+    input.setAttribute('aria-label', name);
+    attachPanelEditor(convo, name, input);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'panel-del';
+    del.title = '从面板里移除这个字段';
+    del.textContent = '✕';
+    del.addEventListener('click', () => removePanelField(convo, name));
+
+    row.append(label, input, del);
+    el.panelFields.appendChild(row);
+  }
+}
+
+function removePanelField(convo, name) {
+  if (!convo) return;
+  convo.panelFields = convoPanelFields(convo).filter((n) => n !== name);
+  const panel = { ...convoPanel(convo) };
+  delete panel[name];
+  convo.panel = panel;
+  convo.updatedAt = now();
+  renderAll();
+  persistConversations(0);
+}
+
+function togglePanel() {
+  panelVisible = !panelVisible;
+  renderPanel();
+}
+
+function resetPanel() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  convo.panel = {};
+  convo.panelFields = [];
+  convo.updatedAt = now();
+  // 让「面板从无到有」的判定立刻成立：下次再出现状态栏时会自动展开
+  panelFieldCountSeen = 0;
+  renderAll();
+  persistConversations(0);
+  showToast('面板已清空，下一条带状态栏的回复会重新建立');
+}
+
+// ---------------------------------------------------------------------------
+//  视角设置 UI（叙述模式 + GM 模式）
+// ---------------------------------------------------------------------------
+
+function syncPerspectiveCustomVisibility() {
+  const isCustom = el.pNarration.value === 'custom';
+  el.pCustomWrap.classList.toggle('hidden', !isCustom);
+}
+
+function openPerspectiveModal() {
+  const convo = activeConvo();
+  if (!convo) {
+    showToast('当前没有会话', 'error');
+    return;
+  }
+
+  el.pNarration.value = convoIsCustomNarration(convo) ? 'custom' : convoNarrationMode(convo);
+  el.pCustom.value = String(convo.customNarration || '');
+  el.pGm.checked = isGmMode(convo);
+  syncPerspectiveCustomVisibility();
+
+  el.perspectiveModal.classList.remove('hidden');
+}
+
+function closePerspectiveModal() {
+  el.perspectiveModal.classList.add('hidden');
+  el.input.focus();
+}
+
+/** 把面板里的设置写回会话；即时生效、即时保存 */
+function applyPerspectiveFromForm() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const mode = el.pNarration.value;
+  convo.narrationMode = Object.prototype.hasOwnProperty.call(NARRATION_MODES, mode) ? mode : DEFAULT_NARRATION_MODE;
+  convo.customNarration = el.pCustom.value.slice(0, MAX_CUSTOM_NARRATION);
+  convo.gmMode = el.pGm.checked;
+  convo.updatedAt = now();
+
+  renderHeader();
+  persistConversations(0);
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -1273,10 +1775,12 @@ async function removeMessage(index) {
  * 组装真正发给模型的消息数组。
  *
  * 顺序（和酒馆的思路一致）：
- *   1. system：人设 + 扮演规则 + 角色设定/性格/场景 + 日期
- *   2. 角色卡里的示例对话（当成已经发生过的对话塞进去）
- *   3. 最近 N 轮真实对话
- *   4. 角色卡里的「对话后指令」，放最后最管用
+ *   1. system：人设 + 扮演规则/GM 规则 + 角色设定/性格/场景 + 叙述模式 + 日期
+ *   2. 世界书命中的设定
+ *   3. 角色卡里的示例对话（当成已经发生过的对话塞进去）
+ *   4. 最近 N 轮真实对话（面板行已剥掉）
+ *   5. 面板状态（当前权威值）
+ *   6. 角色卡里的「对话后指令」，放最后最管用
  *
  * 绑定了角色卡时不再使用「设置」里的全局人设 —— 否则你扮演雷电将军，
  * 系统提示词却在说「你是芭芭拉」，模型会精神分裂。
@@ -1286,8 +1790,9 @@ function buildApiMessages(convo, worldbookSection) {
   const character = characterForConvo(convo);
   const me = userName();
   const charName = (character && character.name) || 'Barbara';
+  const gmMode = isGmMode(convo);
 
-  // 注意：调用时对话末尾通常刚 push 了一条空的 assistant 占位消息（用来流式填空），
+  // 注意：调用时对话末尾通常刚 push 了一条空的 assistant 占位消息（用来填空），
   // 必须把它过滤掉，否则会发给接口一条 content 为空的消息，严格的接口会直接报 400。
   const history = convo.messages.filter(
     (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
@@ -1307,14 +1812,16 @@ function buildApiMessages(convo, worldbookSection) {
     if (character.description) parts.push(`【${charName}的设定】\n${applyMacros(character.description, character, me)}`);
     if (character.personality) parts.push(`【${charName}的性格】\n${applyMacros(character.personality, character, me)}`);
     if (character.scenario) parts.push(`【当前场景】\n${applyMacros(character.scenario, character, me)}`);
-
-    parts.push(
-      `【扮演规则】\n` +
-        `你现在要扮演「${charName}」。请始终以第一人称，用 ${charName} 的语气、性格和说话习惯回应，` +
-        `保持人设前后一致，不要跳出角色，也不要提到自己是 AI、语言模型或助手。` +
-        `把对方称作「${me}」。用动作或神态描写时放在括号里。`
-    );
   }
+
+  // GM 模式换掉那段「不要跳出角色」：世界模型必须能写第三人称、切多个 NPC 视角，
+  // 被「始终以第一人称」捆着会一轮缩回单角色腔调。
+  const ruleText = gmMode ? gmRuleText(charName, me) : roleplayRuleText(charName, me);
+  if (character || gmMode) parts.push(ruleText);
+
+  // 叙述模式：决定要不要写心理 / 旁白，以及用什么标记（标记对上渲染样式）
+  const narration = narrationInstruction(convo);
+  if (narration) parts.push(narration);
 
   if (settings.showDate !== false) {
     const today = new Date().toLocaleDateString('zh-CN', {
@@ -1328,17 +1835,19 @@ function buildApiMessages(convo, worldbookSection) {
 
   if (parts.length) messages.push({ role: 'system', content: parts.join('\n\n') });
 
-  // ---- 1.5 世界书：命中的设定紧跟人设之后 ----
+  // ---- 2. 世界书：命中的设定紧跟人设之后 ----
   // 放在角色定义后面（酒馆叫 After Char Defs）——比角色本身靠前会稀释人设，
   // 比对话历史靠后又容易被忽略，这里是比较稳的位置。
   if (String(worldbookSection || '').trim()) {
     messages.push({ role: 'system', content: String(worldbookSection).trim() });
   }
 
-  // ---- 2. 示例对话 ----
+  // ---- 3. 示例对话 ----
   // 注意：parseExampleDialogue 只剥掉了行首的「{{user}}:」前缀，
   // 正文里的宏还得自己替换一遍，否则模型会读到字面的 {{user}}。
-  if (character) {
+  // GM 模式不注入示例对话：那是「某个角色怎么说话」的样本，
+  // 而这里要的是主持人腔调，塞进去反而把模型的视角拉回单角色。
+  if (character && !gmMode) {
     for (const example of parseExampleDialogue(character.mesExample, charName, me)) {
       messages.push({
         role: example.role,
@@ -1347,12 +1856,24 @@ function buildApiMessages(convo, worldbookSection) {
     }
   }
 
-  // ---- 3. 真实对话历史 ----
+  // ---- 4. 真实对话历史（剥掉面板行，面板由程序权威注入）----
+  // 用本会话的已知字段名来剥：正文里提到同名字样不会被误删。
+  const panelFields = convoPanelFields(convo);
   for (const m of recent) {
-    messages.push({ role: m.role, content: applyMacros(m.content, character, me) });
+    const content = applyMacros(m.content, character, me);
+    messages.push({
+      role: m.role,
+      content: m.role === 'assistant' ? stripPanelLines(content, panelFields) : content
+    });
   }
 
-  // ---- 4. 对话后指令 ----
+  // ---- 5. 面板状态：紧贴对话历史之后，权重很高 ----
+  // 放在这里而不是塞进历史，是因为历史会被 maxTurns 截断 ——
+  // 面板一旦被截出去，模型就开始凭感觉编数值。
+  const panelText = formatPanelForPrompt(convo);
+  if (panelText) messages.push({ role: 'system', content: panelText });
+
+  // ---- 6. 对话后指令 ----
   if (character && String(character.postHistoryInstructions || '').trim()) {
     messages.push({
       role: 'system',
@@ -1493,6 +2014,9 @@ async function requestCompletion(convo) {
     setStreaming(false);
     state.requestId = null;
     convo.updatedAt = now();
+    // 回复写完了，从里面抽出状态栏存到会话上 —— 下一轮由程序权威注入，
+    // 不再依赖模型去抄历史（历史会被 maxTurns 截断）。
+    syncConvoPanel(convo);
     renderAll({ forceScroll: true });
     persistConversations();
     el.input.focus();
@@ -2505,6 +3029,28 @@ function bindEvents() {
   // 点头像换图 / 清除头像
   el.charAvatar.addEventListener('click', pickAvatar);
   el.btnClearAvatar.addEventListener('click', clearAvatar);
+
+  // 状态面板
+  el.btnPanelToggle.addEventListener('click', togglePanel);
+  el.btnPanelClose.addEventListener('click', togglePanel);
+  el.btnPanelReset.addEventListener('click', resetPanel);
+
+  // 视角设置（叙述模式 + GM 模式），改动即时生效
+  el.btnPerspective.addEventListener('click', openPerspectiveModal);
+  el.btnClosePerspective.addEventListener('click', closePerspectiveModal);
+  el.btnClosePerspective2.addEventListener('click', closePerspectiveModal);
+  el.pNarration.addEventListener('change', () => {
+    syncPerspectiveCustomVisibility();
+    applyPerspectiveFromForm();
+  });
+  el.pCustom.addEventListener('input', () => {
+    clearTimeout(el.pCustom._timer);
+    el.pCustom._timer = setTimeout(applyPerspectiveFromForm, 400);
+  });
+  el.pGm.addEventListener('change', applyPerspectiveFromForm);
+  el.perspectiveModal.addEventListener('click', (event) => {
+    if (event.target === el.perspectiveModal) closePerspectiveModal();
+  });
 
   // 世界书：侧边栏独立入口 + 角色表单里的入口
   el.btnWorldbooks.addEventListener('click', openWorldbooksModal);
