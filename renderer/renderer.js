@@ -54,6 +54,18 @@ const el = {
   pCustomWrap: $('p-custom-wrap'),
   pCustom: $('p-custom'),
   pGm: $('p-gm'),
+  // 记忆
+  btnMemory: $('btn-memory'),
+  memoryCount: $('memory-count'),
+  memoryModal: $('memory-modal'),
+  btnCloseMemory: $('btn-close-memory'),
+  btnCloseMemory2: $('btn-close-memory-2'),
+  memorySummaryLine: $('memory-summary-line'),
+  memoryPendingLine: $('memory-pending-line'),
+  memoryList: $('memory-list'),
+  btnSummarizeNow: $('btn-summarize-now'),
+  btnMemoryClear: $('btn-memory-clear'),
+  memoryFootHint: $('memory-foot-hint'),
   confirmModal: $('confirm-modal'),
   confirmTitle: $('confirm-title'),
   confirmMessage: $('confirm-message'),
@@ -828,6 +840,11 @@ function renderHeader() {
   }
   if (viewTags.length) el.convoMeta.textContent += ` · ${viewTags.join(' + ')}`;
 
+  // 记忆：正在压缩时给个提示，压缩完显示覆盖了多少条
+  const segCount = convoSummaries(convo).length;
+  if (convo && convo.summaryBusy) el.convoMeta.textContent += ' · 正在整理记忆…';
+  else if (segCount) el.convoMeta.textContent += ` · 记忆 ${segCount} 段`;
+
   el.hintText.textContent = settings.sendOnEnter === false
     ? 'Ctrl + Enter 发送 · Enter 换行'
     : 'Enter 发送 · Shift + Enter 换行';
@@ -1172,6 +1189,7 @@ function renderAll(options) {
   renderModelSwitch();
   syncPanelVisibilityForConvo(activeConvo());
   renderPanel();
+  renderMemoryIndicator();
   renderMessages(options);
 }
 
@@ -1199,7 +1217,9 @@ function createConvo(activate) {
     // 视角设置：叙述模式（标准/内心描写/上帝视角/自定义）和 GM 模式
     narrationMode: DEFAULT_NARRATION_MODE,
     customNarration: '',
-    gmMode: false
+    gmMode: false,
+    // 分段记忆摘要：每段 { id, title, text, start, end, at }
+    summaries: []
   };
   state.conversations.unshift(convo);
   if (activate !== false) state.activeId = convo.id;
@@ -1768,6 +1788,603 @@ function applyPerspectiveFromForm() {
 }
 
 // ---------------------------------------------------------------------------
+//  分段记忆摘要
+//
+//  问题：只把最近 maxTurns 轮发给模型，超出去的历史模型完全看不见。
+//  调大轮数就烧 token，调小就忘事 —— 这是个死结。
+//
+//  做法：把较早的对话按段压缩成摘要，摘要常驻上下文、原文丢弃。
+//  这样几十轮前的剧情还在，但 token 占用小得多。
+//
+//  摘要由程序管理（和状态面板同一个思路：记忆不能交给模型自己维持），
+//  生成时机是每轮回复之后、后台静默进行，不阻塞聊天。
+// ---------------------------------------------------------------------------
+
+// 未覆盖的消息达到这个数就压一段。一轮 = 一问一答 = 2 条，
+// 也就是大约每 12 轮压一段。
+const SUMMARY_TRIGGER_MESSAGES = 24;
+// 少于这个数不值得单独压一段
+const SUMMARY_MIN_MESSAGES = 12;
+// 单段摘要的长度上限
+const MAX_SUMMARY_CHARS = 4000;
+// 一次送给模型压缩的原文长度上限，超了就从最早的开始截
+const MAX_SUMMARY_INPUT_CHARS = 24000;
+// 连续失败这么多次就暂停自动摘要，避免每轮都白烧一次请求
+const MAX_SUMMARY_FAILURES = 3;
+// 失败后至少隔这么久再试（毫秒）
+const SUMMARY_RETRY_COOLDOWN_MS = 60000;
+
+// 正在压缩的会话 id，防止同一会话并发触发
+const summarizingConvos = new Set();
+// 会话 id -> 连续失败次数
+const summaryFailures = new Map();
+
+/** 真正会进入上下文的消息（和 buildApiMessages 的口径保持一致） */
+function convoContextMessages(convo) {
+  if (!convo || !Array.isArray(convo.messages)) return [];
+  return convo.messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+  );
+}
+
+function convoSummaries(convo) {
+  return convo && Array.isArray(convo.summaries) ? convo.summaries : [];
+}
+
+/** 摘要覆盖到了第几条（未压缩的历史从这里开始） */
+function summarizedCount(convo) {
+  const list = convoSummaries(convo);
+  if (!list.length) return 0;
+  let max = 0;
+  for (const seg of list) {
+    const end = Number(seg.end) || 0;
+    if (end > max) max = end;
+  }
+  return max;
+}
+
+function nextSegmentTitle(convo) {
+  return `第 ${convoSummaries(convo).length + 1} 段`;
+}
+
+/** 摘要拼成注入块；没有摘要就返回空串 */
+function formatSummaryForPrompt(convo) {
+  const list = convoSummaries(convo);
+  if (!list.length) return '';
+
+  const parts = [];
+  for (const seg of list) {
+    const text = String(seg.text || '').trim();
+    if (!text) continue;
+    parts.push(`【${seg.title || '对话摘要'}】\n${text}`);
+  }
+  if (!parts.length) return '';
+
+  return (
+    '[前面的剧情]\n' +
+    '以下是本次对话较早部分的摘要，作为已经发生过的剧情参考，' +
+    '保持人物、地点和事件前后一致；不要向对方复述这份摘要。\n\n' +
+    parts.join('\n\n')
+  );
+}
+
+/**
+ * 摘要生成用的提示词。
+ * 明确要求「只记事实、不要文学化」，因为摘要会一直占用上下文，
+ * 写成抒情散文既费 token 又容易让模型把摘要当成剧情来续写。
+ */
+function buildSummaryPrompt(previousSummary, transcriptText) {
+  const parts = [
+    '你在帮一个长篇角色扮演对话做剧情摘要。',
+    '下面是一段已经发生过的对话原文，请把它压缩成简洁的剧情摘要。',
+    '',
+    '要求：',
+    '1. 只记录事实：发生了什么、到了哪里、见了谁、关系或状态有什么变化、答应过什么、埋了什么伏笔。',
+    '2. 不要文学化描写，不要复述对话原文，不要加入评论。',
+    '3. 按时间顺序写，用短句或分条，控制在 300 字以内。',
+    '4. 直接输出摘要正文，不要任何前言、标题或「摘要：」之类的字样。'
+  ];
+
+  if (previousSummary) {
+    parts.push(
+      '',
+      '此前已有的更早剧情摘要（只作为背景，不要重复它的内容）：',
+      previousSummary
+    );
+  }
+
+  parts.push('', '需要压缩的对话原文：', transcriptText);
+  return parts.join('\n');
+}
+
+/** 把消息列表拼成压缩用的原文；超长就从最早的开始截掉 */
+function buildTranscript(messages, charName) {
+  const lines = [];
+  let total = 0;
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    const who = m.role === 'user' ? '对方' : charName || '角色';
+    // 摘要不需要状态栏，剥掉省 token
+    const text = String(m.content || '').trim();
+    const line = `${who}：${m.role === 'assistant' ? stripPanelLines(text) : text}`;
+
+    if (total + line.length > MAX_SUMMARY_INPUT_CHARS && lines.length) break;
+    total += line.length;
+    lines.unshift(line);
+  }
+
+  return lines.join('\n\n');
+}
+
+/**
+ * 需要压缩的消息区间。
+ * 用「当前消息总数 - 已覆盖数」来算，而不是用固定下标 ——
+ * 用户删掉中间某条消息后，消息数组会整体前移，固定下标会错位。
+ */
+function pendingSummaryRange(convo) {
+  const messages = convoContextMessages(convo);
+  const covered = summarizedCount(convo);
+  const start = Math.min(covered, messages.length);
+  const pending = messages.slice(start);
+  return { messages, start, pending, covered };
+}
+
+/** 调一次模型生成摘要；失败或返回异常时返回 null */
+async function generateSummary(convo, transcript, previousSummary) {
+  const endpoint = ensureConvoEndpoint(convo);
+  if (!endpoint) return null;
+
+  const summaryMessages = [
+    { role: 'system', content: buildSummaryPrompt(previousSummary, transcript) }
+  ];
+
+  const response = await api.sendChat({
+    requestId: `summary-${uid()}`,
+    providerId: endpoint.provider.id,
+    model: endpoint.model,
+    messages: summaryMessages
+  });
+
+  if (!response || response.ok !== true) {
+    throw new Error((response && response.error) || '摘要请求失败');
+  }
+
+  let text = String(response.content || '').trim();
+  if (!text) throw new Error('摘要返回为空');
+
+  // 有些模型会固执地加个前缀，剥掉
+  text = text.replace(/^(剧情)?摘要[：:]\s*/, '').trim();
+
+  if (text.length > MAX_SUMMARY_CHARS) {
+    text = `${text.slice(0, MAX_SUMMARY_CHARS)}…`;
+  }
+
+  return text;
+}
+
+/**
+ * 达到阈值就在后台压一段。
+ * 返回是否真的压了新的一段。
+ */
+async function maybeSummarize(convo) {
+  if (!convo || summarizingConvos.has(convo.id)) return false;
+
+  const failures = summaryFailures.get(convo.id) || 0;
+  if (failures >= MAX_SUMMARY_FAILURES) {
+    const lastAttempt = Number(convo.summaryLastAttempt) || 0;
+    if (Date.now() - lastAttempt < SUMMARY_RETRY_COOLDOWN_MS) return false;
+  }
+
+  const { start, pending } = pendingSummaryRange(convo);
+  if (pending.length < SUMMARY_TRIGGER_MESSAGES) return false;
+
+  // 压缩到「留下最近几轮原文」为止，避免把刚聊完的内容也压掉
+  const keepNewest = SUMMARY_MIN_MESSAGES;
+  const slice = pending.slice(0, Math.max(SUMMARY_MIN_MESSAGES, pending.length - keepNewest));
+  if (slice.length < SUMMARY_MIN_MESSAGES) return false;
+
+  summarizingConvos.add(convo.id);
+  convo.summaryBusy = true;
+  convo.summaryLastAttempt = Date.now();
+  renderHeader();
+
+  try {
+    const transcript = buildTranscript(slice, charNameForSummary(convo));
+    const previous = convoSummaries(convo).map((s) => String(s.text || '')).join('\n\n');
+
+    const text = await generateSummary(convo, transcript, previous);
+    if (!text) return false;
+
+    // 关键：这里必须以 convo.summaries 的当前值重新取，不能用闭包里的旧引用
+    const list = convoSummaries(convo);
+    list.push({
+      id: `s${uid()}`,
+      title: nextSegmentTitle(convo),
+      text,
+      start,
+      end: start + slice.length,
+      at: now()
+    });
+    convo.summaries = list;
+    convo.summaryBusy = false;
+    convo.updatedAt = now();
+
+    summaryFailures.delete(convo.id);
+    persistConversations(0);
+    renderHeader();
+    showToast(`已把较早的 ${slice.length} 条对话压缩成「${list[list.length - 1].title}」`, 'ok');
+    return true;
+  } catch (err) {
+    console.error('生成摘要失败', err);
+    convo.summaryBusy = false;
+    const next = (summaryFailures.get(convo.id) || 0) + 1;
+    summaryFailures.set(convo.id, next);
+    if (next >= MAX_SUMMARY_FAILURES) {
+      showToast('摘要连续失败，已暂停自动摘要（可在记忆面板手动重试）', 'error');
+    }
+    renderHeader();
+    return false;
+  } finally {
+    summarizingConvos.delete(convo.id);
+  }
+}
+
+function charNameForSummary(convo) {
+  const character = characterForConvo(convo);
+  return character ? character.name : '你';
+}
+
+/** 重新生成某一段（用它的原始消息区间） */
+async function regenerateSummary(convo, segmentId) {
+  const list = convoSummaries(convo);
+  const index = list.findIndex((s) => s.id === segmentId);
+  if (index < 0) return false;
+
+  const seg = list[index];
+  const messages = convoContextMessages(convo);
+  const slice = messages.slice(seg.start, seg.end);
+  if (!slice.length) {
+    showToast('这段对应的原文已经不在了，无法重新生成', 'error');
+    return false;
+  }
+
+  if (summarizingConvos.has(convo.id)) {
+    showToast('正在压缩中，稍等一下', 'error');
+    return false;
+  }
+
+  summarizingConvos.add(convo.id);
+  try {
+    const transcript = buildTranscript(slice, charNameForSummary(convo));
+    // 用「这段之前」的摘要当背景
+    const previous = list
+      .slice(0, index)
+      .map((s) => String(s.text || ''))
+      .join('\n\n');
+
+    const text = await generateSummary(convo, transcript, previous);
+    if (!text) return false;
+
+    const fresh = convoSummaries(convo);
+    const target = fresh.find((s) => s.id === segmentId);
+    if (!target) return false;
+    target.text = text;
+    target.at = now();
+    convo.updatedAt = now();
+
+    summaryFailures.delete(convo.id);
+    persistConversations(0);
+    return true;
+  } catch (err) {
+    console.error('重新生成摘要失败', err);
+    showToast((err && err.message) || '重新生成失败', 'error');
+    return false;
+  } finally {
+    summarizingConvos.delete(convo.id);
+  }
+}
+
+/** 手动压一段（记忆面板里的按钮） */
+async function summarizeNow() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const { pending } = pendingSummaryRange(convo);
+  if (pending.length < SUMMARY_MIN_MESSAGES) {
+    showToast(`还没压缩的对话只有 ${pending.length} 条，太少，攒到 ${SUMMARY_MIN_MESSAGES} 条再压`, 'error');
+    return;
+  }
+
+  // 手动触发时绕过阈值判断，直接压
+  summarizingConvos.delete(convo.id);
+  const { start, pending: nowPending } = pendingSummaryRange(convo);
+  const keepNewest = SUMMARY_MIN_MESSAGES;
+  const slice = nowPending.slice(0, Math.max(SUMMARY_MIN_MESSAGES, nowPending.length - keepNewest));
+  if (slice.length < SUMMARY_MIN_MESSAGES) {
+    showToast('可压缩的内容太少', 'error');
+    return;
+  }
+
+  summarizingConvos.add(convo.id);
+  convo.summaryBusy = true;
+  renderHeader();
+  renderMemoryModal();
+
+  try {
+    const transcript = buildTranscript(slice, charNameForSummary(convo));
+    const previous = convoSummaries(convo).map((s) => String(s.text || '')).join('\n\n');
+    const text = await generateSummary(convo, transcript, previous);
+    if (!text) {
+      showToast('摘要返回为空', 'error');
+      return;
+    }
+
+    const list = convoSummaries(convo);
+    list.push({
+      id: `s${uid()}`,
+      title: nextSegmentTitle(convo),
+      text,
+      start,
+      end: start + slice.length,
+      at: now()
+    });
+    convo.summaries = list;
+    convo.updatedAt = now();
+    summaryFailures.delete(convo.id);
+    persistConversations(0);
+    showToast(`已压缩 ${slice.length} 条对话`, 'ok');
+  } catch (err) {
+    console.error('压缩失败', err);
+    showToast((err && err.message) || '压缩失败', 'error');
+  } finally {
+    convo.summaryBusy = false;
+    summarizingConvos.delete(convo.id);
+    renderHeader();
+    renderMemoryModal();
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  记忆管理 UI
+// ---------------------------------------------------------------------------
+
+let memoryEditingId = null; // 正在编辑的摘要段
+
+function renderMemoryIndicator() {
+  const convo = activeConvo();
+  const count = convo ? convoSummaries(convo).length : 0;
+
+  el.memoryCount.classList.toggle('hidden', count === 0);
+  el.memoryCount.textContent = String(count);
+  el.btnMemory.title = count
+    ? `已压缩 ${count} 段早期剧情`
+    : '较早的对话会自动压成摘要';
+}
+
+function openMemoryModal() {
+  const convo = activeConvo();
+  if (!convo) {
+    showToast('当前没有会话', 'error');
+    return;
+  }
+
+  memoryEditingId = null;
+  renderMemoryModal();
+  el.memoryModal.classList.remove('hidden');
+}
+
+function closeMemoryModal() {
+  el.memoryModal.classList.add('hidden');
+  el.input.focus();
+}
+
+function renderMemoryModal() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const { messages, pending, covered } = pendingSummaryRange(convo);
+  const list = convoSummaries(convo);
+
+  el.memorySummaryLine.textContent = list.length
+    ? `已压缩 ${list.length} 段，覆盖前 ${covered} / ${messages.length} 条消息`
+    : '还没有摘要';
+  el.memoryPendingLine.textContent = convo.summaryBusy
+    ? '正在压缩…'
+    : `未压缩 ${pending.length} 条（达到 ${SUMMARY_TRIGGER_MESSAGES} 条会自动压缩）`;
+
+  el.btnSummarizeNow.disabled = pending.length < SUMMARY_MIN_MESSAGES || !!convo.summaryBusy;
+  el.btnMemoryClear.disabled = list.length === 0;
+  el.memoryFootHint.textContent = `「${convo.title || '新对话'}」的摘要只保存在你自己电脑上`;
+
+  el.memoryList.innerHTML = '';
+
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'memory-empty';
+    empty.textContent =
+      `还没有摘要。聊到 ${SUMMARY_TRIGGER_MESSAGES} 条未压缩消息时会自动压一段，` +
+      '也可以点上面的按钮手动压。';
+    el.memoryList.appendChild(empty);
+    return;
+  }
+
+  list.forEach((seg, index) => {
+    el.memoryList.appendChild(buildMemoryCard(convo, seg, index, list.length));
+  });
+}
+
+function buildMemoryCard(convo, seg, index, total) {
+  const card = document.createElement('div');
+  card.className = 'memory-card';
+
+  const head = document.createElement('div');
+  head.className = 'memory-card-head';
+
+  const title = document.createElement('span');
+  title.className = 'memory-card-title';
+  title.textContent = seg.title || `第 ${index + 1} 段`;
+
+  const meta = document.createElement('span');
+  meta.className = 'memory-card-meta';
+  const when = seg.at ? new Date(seg.at).toLocaleString('zh-CN', { hour12: false }) : '';
+  meta.textContent = `第 ${seg.start + 1}–${seg.end} 条 · ${String(seg.text || '').length} 字${when ? ' · ' + when : ''}`;
+
+  head.append(title, meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'memory-card-actions';
+
+  const isEditing = memoryEditingId === seg.id;
+
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = `btn btn-ghost btn-sm${isEditing ? ' active' : ''}`;
+  editBtn.textContent = isEditing ? '取消编辑' : '编辑';
+  editBtn.addEventListener('click', () => {
+    memoryEditingId = isEditing ? null : seg.id;
+    renderMemoryModal();
+  });
+
+  const regenBtn = document.createElement('button');
+  regenBtn.type = 'button';
+  regenBtn.className = 'btn btn-ghost btn-sm';
+  regenBtn.textContent = '重新生成';
+  regenBtn.title = '用这段对应的原文重新压一次';
+  regenBtn.disabled = !!convo.summaryBusy;
+  regenBtn.addEventListener('click', async () => {
+    regenBtn.disabled = true;
+    regenBtn.textContent = '生成中…';
+    const ok = await regenerateSummary(convo, seg.id);
+    renderMemoryModal();
+    if (ok) showToast('已重新生成', 'ok');
+  });
+
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'btn btn-danger btn-sm';
+  delBtn.textContent = '删除';
+  delBtn.title = '删掉这段摘要，对应的原文会重新进入上下文';
+  delBtn.addEventListener('click', () => deleteSummarySegment(convo, seg.id));
+
+  actions.append(editBtn, regenBtn, delBtn);
+
+  const body = document.createElement('div');
+  body.className = 'memory-card-body';
+
+  if (isEditing) {
+    const box = document.createElement('textarea');
+    box.className = 'memory-edit-box';
+    box.value = String(seg.text || '');
+    box.spellcheck = false;
+
+    const editActions = document.createElement('div');
+    editActions.className = 'memory-card-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary btn-sm';
+    saveBtn.textContent = '保存';
+    saveBtn.addEventListener('click', async () => {
+      const target = convoSummaries(convo).find((s) => s.id === seg.id);
+      if (!target) return;
+      let text = box.value.trim();
+      if (text.length > MAX_SUMMARY_CHARS) text = `${text.slice(0, MAX_SUMMARY_CHARS)}…`;
+      if (!text) {
+        showToast('摘要不能为空，要删就点「删除」', 'error');
+        return;
+      }
+      target.text = text;
+      target.at = now();
+      convo.updatedAt = now();
+      memoryEditingId = null;
+      persistConversations(0);
+      renderMemoryModal();
+      showToast('摘要已保存', 'ok');
+    });
+
+    editActions.appendChild(saveBtn);
+    body.append(box, editActions);
+  } else {
+    const text = document.createElement('div');
+    text.className = 'memory-card-text';
+    text.textContent = seg.text || '';
+    body.appendChild(text);
+  }
+
+  card.append(head, actions, body);
+  return card;
+}
+
+async function deleteSummarySegment(convo, segmentId) {
+  const seg = convoSummaries(convo).find((s) => s.id === segmentId);
+  if (!seg) return;
+
+  const ok = await confirmDialog({
+    title: '删除摘要',
+    message: `删除「${seg.title}」？对应的原文会重新进入上下文，占用更多 token。`,
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
+
+  convo.summaries = convoSummaries(convo).filter((s) => s.id !== segmentId);
+  // 删掉中间某段后，后面各段的覆盖范围就断了 —— 把范围重新编号，
+  // 否则 buildApiMessages 会从错误的覆盖点往后取历史。
+  renumberSummaries(convo);
+  convo.updatedAt = now();
+  persistConversations(0);
+  renderMemoryModal();
+  renderMemoryIndicator();
+  showToast('摘要已删除，原文重新进入上下文');
+}
+
+/**
+ * 删除某段后，把各段的 start/end 重新串起来。
+ * 摘要内容不重写 —— 只是让覆盖范围保持连续。
+ */
+function renumberSummaries(convo) {
+  const list = convoSummaries(convo);
+  const messages = convoContextMessages(convo);
+  let cursor = 0;
+
+  for (const seg of list) {
+    const span = Math.max(0, (Number(seg.end) || 0) - (Number(seg.start) || 0));
+    seg.start = cursor;
+    seg.end = Math.min(messages.length, cursor + span);
+    cursor = seg.end;
+  }
+
+  // 只保留真正覆盖了内容的段
+  convo.summaries = list.filter((s) => s.end > s.start);
+}
+
+async function clearAllSummaries() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const list = convoSummaries(convo);
+  if (!list.length) return;
+
+  const ok = await confirmDialog({
+    title: '清空全部摘要',
+    message: `删除全部 ${list.length} 段摘要？对应的原文会重新进入上下文，token 占用会明显上升。`,
+    confirmText: '清空',
+    danger: true
+  });
+  if (!ok) return;
+
+  convo.summaries = [];
+  memoryEditingId = null;
+  convo.updatedAt = now();
+  summaryFailures.delete(convo.id);
+  persistConversations(0);
+  renderMemoryModal();
+  renderMemoryIndicator();
+  showToast('摘要已清空');
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -1799,7 +2416,12 @@ function buildApiMessages(convo, worldbookSection) {
   );
 
   const turns = Math.max(1, Number(settings.maxTurns) || CONFIG.MAX_TURNS);
-  const recent = history.slice(-turns * 2);
+  // 从摘要覆盖点开始取「最近 N 轮」。
+  // 如果还按 slice(-turns*2) 取，会出现「摘要写到第 30 条，原文只发第 70 条起」的断层 ——
+  // 中间那段模型两边都看不到。从覆盖点往后、按轮数取，上下文才是连续的。
+  const covered = summarizedCount(convo);
+  const uncovered = covered > 0 ? history.slice(covered) : history;
+  const recent = uncovered.slice(-turns * 2);
 
   const messages = [];
 
@@ -1841,6 +2463,11 @@ function buildApiMessages(convo, worldbookSection) {
   if (String(worldbookSection || '').trim()) {
     messages.push({ role: 'system', content: String(worldbookSection).trim() });
   }
+
+  // ---- 2.5 前面的剧情：较早对话的摘要 ----
+  // 放在对话历史之前、示例对话之后的位置，让模型先读背景再读最近对话。
+  const summaryText = formatSummaryForPrompt(convo);
+  if (summaryText) messages.push({ role: 'system', content: summaryText });
 
   // ---- 3. 示例对话 ----
   // 注意：parseExampleDialogue 只剥掉了行首的「{{user}}:」前缀，
@@ -2020,6 +2647,10 @@ async function requestCompletion(convo) {
     renderAll({ forceScroll: true });
     persistConversations();
     el.input.focus();
+
+    // 攒够未压缩的对话就后台压一段摘要。
+    // 放在最后、不 await：压缩要额外调一次模型，不该让你等它。
+    maybeSummarize(convo).catch((err) => console.error('后台摘要失败', err));
   }
 }
 
@@ -3034,6 +3665,16 @@ function bindEvents() {
   el.btnPanelToggle.addEventListener('click', togglePanel);
   el.btnPanelClose.addEventListener('click', togglePanel);
   el.btnPanelReset.addEventListener('click', resetPanel);
+
+  // 记忆管理
+  el.btnMemory.addEventListener('click', openMemoryModal);
+  el.btnCloseMemory.addEventListener('click', closeMemoryModal);
+  el.btnCloseMemory2.addEventListener('click', closeMemoryModal);
+  el.btnSummarizeNow.addEventListener('click', summarizeNow);
+  el.btnMemoryClear.addEventListener('click', clearAllSummaries);
+  el.memoryModal.addEventListener('click', (event) => {
+    if (event.target === el.memoryModal) closeMemoryModal();
+  });
 
   // 视角设置（叙述模式 + GM 模式），改动即时生效
   el.btnPerspective.addEventListener('click', openPerspectiveModal);

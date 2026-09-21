@@ -1946,6 +1946,103 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   .panel-name { width: 70px; }
 }
 
+/* ------------------------------ 记忆（分段摘要） ------------------------------ */
+
+/* 顶栏「记忆」按钮上的段数角标 */
+.memory-badge {
+  display: inline-block;
+  margin-left: 5px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 15px;
+  text-align: center;
+  vertical-align: 1px;
+}
+
+.memory-card { max-width: 720px; }
+
+.memory-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--bg-side);
+}
+
+.memory-stat { font-size: 12px; color: var(--text-dim); }
+
+.memory-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+
+.memory-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+
+.memory-empty {
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+/* 摘要卡片：head 和 actions 是同一张卡的两行 */
+.memory-card .memory-card-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.memory-card .memory-card-meta { font-size: 11px; color: var(--text-faint); }
+
+.modal-body .memory-card {
+  padding: 11px 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-card);
+  max-width: none;
+}
+
+.memory-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.memory-card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+
+/* 摘要正文：保留换行和空行 */
+.memory-card-text {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--bg-side);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.memory-edit-box {
+  width: 100%;
+  min-height: 170px;
+  box-sizing: border-box;
+  font-size: 12.5px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+/* 「编辑」按钮的激活态 */
+.btn.active {
+  border-color: rgba(74, 134, 232, 0.5);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .modal, .modal-card { animation: none; }
   .btn, .icon-btn, .check, .check-title,
