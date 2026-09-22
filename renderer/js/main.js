@@ -2880,6 +2880,80 @@ async function illustrateMessage(index) {
 }
 
 // ---------------------------------------------------------------------------
+//  语义检索（RAG）
+//
+//  关键词匹配的死角：你写了「十二泰坦」的设定，但对话里说的是「那些神」——
+//  那条设定就永远出不来。语义检索按「意思」把相关的旧内容和设定捞回来。
+//
+//  配置是独立的一组（服务商 + 模型，走 /embeddings），和聊天、生图都不相干。
+// ---------------------------------------------------------------------------
+
+// 一次最多带几条进来。多了会挤掉真正最近的内容，而且 token 哗哗涨
+const RAG_TOP_K = 4;
+// 相似度门槛。语义检索最怕「硬凑」——不管相不相关都塞几条进来，
+// 上下文被污染了还不如不检索
+const RAG_MIN_SCORE = 0.32;
+// 拿最近几条拼查询。只用最后一条太窄（比如「嗯」这种），太多又会把主题冲淡
+const RAG_QUERY_TURNS = 3;
+
+/** 把捞回来的东西拼成注入块 */
+function formatRagSection(items, character, me) {
+  if (!items || !items.length) return '';
+
+  const lines = items.map((item) => {
+    if (item.kind === 'worldbook') {
+      return `【设定 · ${item.title || '未命名'}】\n${applyMacros(item.text, character, me)}`;
+    }
+    const who = item.role === 'user' ? me : (character && character.name) || '对方';
+    return `【早先 · ${who}】\n${applyMacros(item.text, character, me)}`;
+  });
+
+  return (
+    '[可能相关的往事]\n' +
+    '下面这些是更早的内容或设定，和现在聊的有关，可以用来保持前后一致。' +
+    '自然地用，不要直接复述：\n\n' +
+    lines.join('\n\n')
+  );
+}
+
+/** 跑一次检索，拿到可以注入的那一段（失败就返回空字符串，绝不拦着聊天） */
+async function recallSection(convo) {
+  const settings = state.settings || {};
+  if (settings.ragEnabled !== true || !settings.embeddingProviderId) return '';
+
+  const history = (convo.messages || []).filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+  );
+  if (history.length < 2) return '';
+
+  const recent = history.slice(-RAG_QUERY_TURNS);
+  const query = recent.map((m) => String(m.content)).join('\n');
+
+  try {
+    const result = await api.ragRecall({
+      providerId: settings.embeddingProviderId,
+      model: settings.embeddingModel,
+      convoId: convo.id,
+      worldbookIds: convoWorldbookIds(convo),
+      // 最近这些本来就会进上下文，别捞回来占位置
+      recentCount: RAG_QUERY_TURNS * 2,
+      query,
+      topK: RAG_TOP_K,
+      minScore: RAG_MIN_SCORE
+    });
+
+    if (!result || result.ok !== true) {
+      console.error('语义检索失败', result && result.error);
+      return '';
+    }
+    return formatRagSection(result.items, characterForConvo(convo), convoUserName(convo));
+  } catch (err) {
+    console.error('语义检索失败', err);
+    return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -2897,7 +2971,7 @@ async function illustrateMessage(index) {
  * 绑定了角色卡时不再使用「设置」里的全局人设 —— 否则你扮演雷电将军，
  * 系统提示词却在说「你是昔涟」，模型会精神分裂。
  */
-function buildApiMessages(convo, worldbookSection) {
+function buildApiMessages(convo, worldbookSection, ragSection) {
   const settings = state.settings || {};
   const character = characterForConvo(convo);
   // 进了世界的会话用玩家自己创建的角色名，其它会话用设置里的名字
@@ -2988,6 +3062,12 @@ function buildApiMessages(convo, worldbookSection) {
   // 比对话历史靠后又容易被忽略，这里是比较稳的位置。
   if (String(worldbookSection || '').trim()) {
     messages.push({ role: 'system', content: String(worldbookSection).trim() });
+  }
+
+  // ---- 2.2 语义检索捞回来的往事 / 设定 ----
+  // 紧跟在世界书后面：都是「参考背景」，而且都是可选的（捞不到就什么都不加）
+  if (String(ragSection || '').trim()) {
+    messages.push({ role: 'system', content: String(ragSection).trim() });
   }
 
   // ---- 2.5 前面的剧情：较早对话的摘要 ----
@@ -3209,10 +3289,11 @@ async function continueLastMessage() {
   }
 
   const worldbookSection = await matchWorldbookSection(convo);
+  const ragSection = await recallSection(convo);
   const requestId = uid();
   state.requestId = requestId;
 
-  const messages = buildApiMessages(convo, worldbookSection);
+  const messages = buildApiMessages(convo, worldbookSection, ragSection);
   messages.push({ role: 'user', content: CONTINUE_NUDGE });
 
   const index = convo.messages.length - 1;
@@ -3276,6 +3357,7 @@ async function requestCompletion(convo, options) {
   // 之前这里要求「消息数 ≥ 3」才匹配，但那会让世界模型的第一个回合拿不到设定 ——
   // 而开场引导往往正是最需要世界书的时候。匹配本身是本地纯计算，不省这一下。
   const worldbookSection = await matchWorldbookSection(convo);
+  const ragSection = await recallSection(convo);
 
   const requestId = uid();
   state.requestId = requestId;
@@ -3323,7 +3405,7 @@ async function requestCompletion(convo, options) {
       requestId,
       providerId: endpoint.provider.id,
       model: endpoint.model,
-      messages: buildApiMessages(convo, worldbookSection)
+      messages: buildApiMessages(convo, worldbookSection, ragSection)
     });
 
     if (!response || response.ok !== true) {
@@ -3478,6 +3560,18 @@ function fillSettingsForm(settings) {
     : '';
   el.s.imageModel.value = settings.imageModel || '';
   el.s.imageSize.value = settings.imageSize || '1024x1024';
+
+  // 语义检索：同样是一个「不启用」+ 全部服务商
+  el.s.ragEnabled.checked = settings.ragEnabled === true;
+  clear(el.s.embeddingProvider);
+  el.s.embeddingProvider.appendChild(h('option', { value: '', text: '（不选）' }));
+  for (const provider of providers()) {
+    el.s.embeddingProvider.appendChild(h('option', { value: provider.id, text: provider.name }));
+  }
+  el.s.embeddingProvider.value = providers().some((p) => p.id === settings.embeddingProviderId)
+    ? settings.embeddingProviderId
+    : '';
+  el.s.embeddingModel.value = settings.embeddingModel || '';
 }
 
 // ------------------------------ 服务商编辑 ------------------------------
@@ -3633,6 +3727,9 @@ function readSettingsForm() {
     imageProviderId: el.s.imageProvider.value || '',
     imageModel: el.s.imageModel.value.trim(),
     imageSize: el.s.imageSize.value.trim() || '1024x1024',
+    ragEnabled: el.s.ragEnabled.checked,
+    embeddingProviderId: el.s.embeddingProvider.value || '',
+    embeddingModel: el.s.embeddingModel.value.trim(),
     // 和「服务商模型列表」一样是「分隔符拆开的字符串列表」，直接复用那个解析
     commonAttributes: parseModels(el.s.commonAttrs.value).slice(0, 40)
   };

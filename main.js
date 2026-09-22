@@ -129,6 +129,10 @@ const DEFAULT_SETTINGS = {
   imageProviderId: '',
   imageModel: '',
   imageSize: '1024x1024',
+  // --- 语义检索（RAG）：又是一组独立配置，走 /embeddings ---
+  ragEnabled: false,
+  embeddingProviderId: '',
+  embeddingModel: '',
   // --- 对话窗口外观（只影响显示，不进提示词）---
   chatFontSize: 14,     // 消息正文字号（px）
   chatBoldColor: '',    // **加粗** 用什么颜色，空 = 跟随主题
@@ -371,6 +375,12 @@ function normalizeSettings(saved) {
   const imgSize = String(raw.imageSize || '').trim();
   // 尺寸各家不一样，不写死白名单，只要求是「数字x数字」
   s.imageSize = /^\d{2,4}x\d{2,4}$/i.test(imgSize) ? imgSize.toLowerCase() : DEFAULT_SETTINGS.imageSize;
+
+  // 语义检索：默认关。开着的时候每一轮都要多调一次向量接口，
+  // 而且第一轮还要给历史消息补索引 —— 得让用户明确知道自己在花这份钱
+  s.ragEnabled = raw.ragEnabled === true;
+  s.embeddingProviderId = typeof raw.embeddingProviderId === 'string' ? raw.embeddingProviderId.trim().slice(0, 60) : '';
+  s.embeddingModel = typeof raw.embeddingModel === 'string' ? raw.embeddingModel.trim().slice(0, 120) : '';
 
   // 世界书递归深度：0 表示关掉递归（就算条目勾了也不连锁）
   const depth = Number(raw.worldbookRecursiveDepth);
@@ -770,6 +780,7 @@ function normalizeWorldbookEntry(raw) {
 // ---------------------------------------------------------------------------
 
 const { pngWithTextChunk, parseCharacterCardPng } = require('./main/png.js');
+const { hashText, encodeVector, decodeVector, rankBySimilarity, collectCandidates } = require('./main/vectors.js');
 
 /** 世界书的条目列表：可能是数组，也可能是酒馆导出时那种以索引为键的对象 */
 function worldbookEntryList(raw) {
@@ -927,6 +938,86 @@ function chatUrl(baseUrl) {
 
 function imagesUrl(baseUrl) {
   return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/images/generations`;
+}
+
+function embeddingsUrl(baseUrl) {
+  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/embeddings`;
+}
+
+// ---------------------------------------------------------------------------
+//  语义检索（RAG）的向量仓库
+//
+//  存在 userData\vectors.json：{ version, items: { "<model>::<key>": "<base64 float32>" } }
+//  键里带上**模型名**，所以换 embedding 模型不会污染 —— 不同模型的向量空间根本不可比，
+//  带上模型名之后老向量自然用不上，也就不会算出一堆假相似度。
+// ---------------------------------------------------------------------------
+
+const VECTORS_VERSION = 1;
+// 一次最多补多少条向量。第一次开语义检索时长对话可能有几百条要索引，
+// 一次全塞进一个请求既慢又容易被接口限流 —— 分几轮补齐就行
+const MAX_EMBED_PER_CALL = 32;
+// 一次请求最多多少条文本（查询 + 补索引共用）
+const MAX_EMBED_INPUTS = 64;
+
+function vectorsFile() {
+  return userDataFile('vectors.json');
+}
+
+function loadVectors() {
+  const data = loadJsonWithFallback(vectorsFile());
+  if (!data || data.version !== VECTORS_VERSION || !data.items || typeof data.items !== 'object') {
+    return { version: VECTORS_VERSION, items: {} };
+  }
+  return { version: VECTORS_VERSION, items: data.items };
+}
+
+function saveVectors(store) {
+  try {
+    writeJson(vectorsFile(), store);
+  } catch (err) {
+    // 向量只是加速用的缓存，存不下去也不该影响聊天
+    console.error('向量缓存写入失败', err);
+  }
+}
+
+/** 调一次 /embeddings，返回向量数组（顺序和输入一一对应） */
+async function embedTexts(endpoint, texts) {
+  const list = (Array.isArray(texts) ? texts : []).map((t) => String(t || '').slice(0, 8000));
+  if (!list.length) return [];
+
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (endpoint.apiKey) headers.Authorization = `Bearer ${endpoint.apiKey}`;
+
+  const json = await requestJson({
+    url: embeddingsUrl(endpoint.baseUrl),
+    method: 'POST',
+    headers,
+    body: { model: endpoint.model, input: list },
+    timeoutMs: 60000
+  });
+
+  const data = Array.isArray(json && json.data) ? json.data : null;
+  if (!data || data.length !== list.length) {
+    throw new Error('向量接口返回的条数和请求对不上。');
+  }
+
+  // 有的服务商不保证顺序，按 index 排一下更稳
+  const sorted = data.slice().sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
+  return sorted.map((d) => d.embedding);
+}
+
+/** 世界书 / 会话里所有够格的候选文本（收集逻辑在 main/vectors.js，那边是纯函数） */
+function ragCandidates(request) {
+  const { conversations } = loadConversations();
+  const convo = conversations.find((c) => c.id === request.convoId);
+  const { worldbooks } = loadWorldbooks();
+
+  return collectCandidates({
+    messages: convo ? convo.messages : [],
+    recentCount: request.recentCount,
+    books: worldbooks,
+    worldbookIds: request.worldbookIds
+  });
 }
 
 /**
@@ -1708,6 +1799,79 @@ function registerIpc() {
     }
 
     return { canceled: false, filePath: result.filePath };
+  });
+
+  /**
+   * 语义检索（RAG）。
+   *
+   * 流程：收集候选（较早的消息 + 绑定的世界书条目）→ 补齐缺的向量（增量、每次最多
+   * MAX_EMBED_PER_CALL 条）→ 给查询算向量 → 余弦排序取前 K 个 → 返回文本给渲染层注入。
+   *
+   * 只做「捞出来」，注入格式交给渲染层 —— 那边才知道该怎么措辞。
+   */
+  ipcMain.handle('rag:recall', async (_event, payload) => {
+    const request = payload || {};
+    const settings = loadSettings();
+
+    const endpoint = endpointFor(settings, request.providerId, request.model);
+    if (!endpoint) return { ok: false, error: '还没有配置向量模型，请到「设置 → 语义检索」里选一个。' };
+    if (!endpoint.apiKey) return { ok: false, error: `还没有填写「${endpoint.providerName}」的 API Key。` };
+
+    const query = String(request.query || '').trim();
+    if (!query) return { ok: false, error: '没有可用来检索的内容。' };
+
+    const candidates = ragCandidates(request);
+    if (!candidates.length) return { ok: true, items: [], embedded: 0, indexed: 0, total: 0 };
+
+    const store = loadVectors();
+    const keyOf = (c) => `${endpoint.model}::${c.key}`;
+
+    try {
+      // ---- 补齐缺的向量（增量）----
+      const missing = candidates.filter((c) => !store.items[keyOf(c)]);
+      const pending = missing.slice(0, Math.min(MAX_EMBED_PER_CALL, MAX_EMBED_INPUTS - 1));
+
+      if (pending.length) {
+        const vectors = await embedTexts(endpoint, pending.map((c) => c.text));
+        pending.forEach((c, i) => {
+          if (vectors[i]) store.items[keyOf(c)] = encodeVector(vectors[i]);
+        });
+        saveVectors(store);
+      }
+
+      // ---- 查询向量 ----
+      const queryVector = (await embedTexts(endpoint, [query]))[0];
+      if (!queryVector) return { ok: false, error: '向量接口没有返回查询向量。' };
+
+      // ---- 排序 ----
+      const ready = [];
+      for (const c of candidates) {
+        const raw = store.items[keyOf(c)];
+        const vector = raw ? decodeVector(raw) : null;
+        if (vector) ready.push({ ...c, vector });
+      }
+
+      const ranked = rankBySimilarity(Float32Array.from(queryVector), ready, {
+        topK: request.topK,
+        minScore: request.minScore
+      });
+
+      return {
+        ok: true,
+        items: ranked.map((r) => ({
+          kind: r.kind,
+          title: r.title || '',
+          role: r.role || '',
+          text: r.text,
+          score: Number(r.score.toFixed(4))
+        })),
+        embedded: pending.length,
+        indexed: ready.length,
+        total: candidates.length
+      };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || '语义检索失败' };
+    }
   });
 
   /**

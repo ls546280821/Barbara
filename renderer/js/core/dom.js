@@ -160,6 +160,9 @@ export const el = {
     imageProvider: $('s-image-provider'),
     imageModel: $('s-image-model'),
     imageSize: $('s-image-size'),
+    ragEnabled: $('s-rag-enabled'),
+    embeddingProvider: $('s-embedding-provider'),
+    embeddingModel: $('s-embedding-model'),
     commonAttrs: $('s-commonattrs')
   },
   p: {

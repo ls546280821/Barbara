@@ -402,6 +402,51 @@
             配好之后，鼠标悬停在 AI 的回复上会多一个<b>「配图」</b>。
           </span>
         </section>
+
+        <!-- 语义检索：又是一组独立配置，走 /embeddings -->
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">语义检索</div>
+              <div class="panel-desc">按「意思」把相关的旧内容和设定捞回来，而不是靠关键词</div>
+            </div>
+          </div>
+
+          <label class="check">
+            <input id="s-rag-enabled" type="checkbox" />
+            <span class="check-text">
+              <span class="check-title">启用语义检索</span>
+              <span class="check-desc">
+                每一轮会多调一次向量接口（要多花钱）。<b>第一次开的时候</b>还要给已有的
+                消息和世界书补索引，会分几轮慢慢补完。
+              </span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">向量服务商</span>
+            <select id="s-embedding-provider" aria-label="向量服务商"></select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">向量模型</span>
+            <input id="s-embedding-model" type="text" spellcheck="false" placeholder="例如 text-embedding-3-small" />
+          </label>
+
+          <span class="field-help">
+            向量模型也是<b>另外一组</b>（走 <code>/embeddings</code>），和聊天、生图都不相干。<br />
+            它解决的问题是：<b>世界书靠关键词命中</b>，你写了「十二泰坦」但对话里只说了
+            「那些神」，那条设定就永远出不来；语义检索能把它捞回来。<br />
+            向量存在 <code>vectors.json</code> 里（只在本机）。<b>换向量模型不会串味</b> ——
+            缓存键里带着模型名，不同模型的向量本来就不能比。
+          </span>
+        </section>
       </div>
 
       <footer class="modal-foot">

@@ -670,8 +670,13 @@ await scenario('给剧情配图（生图）', async () => {
   await sleep(150);
 
   check('设置里有生图服务商下拉', !!byId('s-image-provider'));
+  const providerCount = ((await window.barbara.getSettings()).settings.providers || []).length;
   const imgOptions = Array.from(byId('s-image-provider').options).map((o) => o.value);
-  check('下拉里是「不启用」+ 全部服务商', imgOptions.length === 3 && imgOptions.includes('p-img'), JSON.stringify(imgOptions));
+  check(
+    '下拉里是「不启用」+ 全部服务商',
+    imgOptions.length === providerCount + 1 && imgOptions.includes('p-img'),
+    `${imgOptions.length} 项（服务商 ${providerCount} 个）：${JSON.stringify(imgOptions)}`
+  );
 
   setValue('#s-image-provider', 'p-img');
   setValue('#s-image-model', 'img-model-x');
@@ -1211,6 +1216,65 @@ await scenario('会话：分支与存档点', async () => {
 
   click('#btn-close-memory');
   await sleep(200);
+});
+
+// ---------------------------------------------------------------------------
+//  场景 20：语义检索（RAG）
+//
+//  关键词匹配的死角：世界书里写着「十二泰坦」，但对话里问的是「那些神」——
+//  按关键词永远命中不了。这里就验这件事：问「那些神」，那条设定能不能被捞回来。
+//  具体注入了什么由宿主侧断言（见 smoke-test.js 的 probeRag）。
+// ---------------------------------------------------------------------------
+await scenario('语义检索', async () => {
+  // 先在设置里打开并配好
+  click('#btn-settings');
+  await waitFor('设置弹窗打开', () => shown('#settings-modal'));
+  await sleep(200);
+
+  check('设置里有语义检索这一节', !!byId('s-rag-enabled') && !!byId('s-embedding-provider'));
+  check('默认是关的（开着要额外花钱）', byId('s-rag-enabled').checked === false);
+
+  const embOptions = Array.from(byId('s-embedding-provider').options).map((o) => o.value);
+  check('向量服务商下拉把三个服务商都列上了', embOptions.length === 4 && embOptions.includes('p-emb'), JSON.stringify(embOptions));
+
+  setValue('#s-embedding-provider', 'p-emb');
+  setValue('#s-embedding-model', 'emb-model-x');
+  click('#s-rag-enabled');
+  await sleep(120);
+  click('#btn-save-settings');
+  await waitFor('设置关闭', () => !shown('#settings-modal'));
+  await sleep(400);
+
+  const saved = (await window.barbara.getSettings()).settings;
+  check('语义检索配置落盘了', saved.ragEnabled === true && saved.embeddingProviderId === 'p-emb' && saved.embeddingModel === 'emb-model-x', JSON.stringify({ on: saved.ragEnabled, p: saved.embeddingProviderId, m: saved.embeddingModel }));
+  check('聊天模型没被动过', saved.activeProviderId === 'p-test' && saved.activeModel === 'test-model', `${saved.activeProviderId}/${saved.activeModel}`);
+
+  // 发一条「关键词命不中、但意思相关」的话
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  await sleep(200);
+  setValue('#input', '那些神到底是谁？');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 12000);
+  await sleep(400);
+
+  // 负向对照：关掉之后不该再注入
+  click('#btn-settings');
+  await waitFor('设置弹窗打开', () => shown('#settings-modal'));
+  await sleep(200);
+  click('#s-rag-enabled');
+  await sleep(120);
+  click('#btn-save-settings');
+  await waitFor('设置关闭', () => !shown('#settings-modal'));
+  await sleep(300);
+
+  const off = (await window.barbara.getSettings()).settings;
+  check('关掉之后落盘也是关的', off.ragEnabled === false, String(off.ragEnabled));
+
+  setValue('#input', '关了语义检索之后再问一句，这句不该带往事');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 12000);
+  await sleep(400);
 });
 
 // ---------------------------------------------------------------------------

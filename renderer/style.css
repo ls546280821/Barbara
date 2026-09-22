@@ -926,6 +926,16 @@ body {
   50% { opacity: 0.62; }
 }
 
+/* 设置里的多行帮助文字（语义检索那段比较长） */
+.field-help code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+
 #input {
   flex: 1 1 auto;
   border: none;

@@ -29,6 +29,15 @@ const { normalizeCharacter } = require('../main/characters.js');
 const { pngWithTextChunk, parseCharacterCardPng } = require('../main/png.js');
 // 世界书匹配（含递归扫描）也用真实现
 const { matchWorldbookEntries, formatWorldbookSection } = require('../main/worldbook-match.js');
+// 语义检索的向量工具也用真实现（编解码 / 余弦 / topK 都是它）
+const {
+  hashText,
+  encodeVector,
+  decodeVector,
+  cosineSimilarity,
+  rankBySimilarity,
+  collectCandidates
+} = require('../main/vectors.js');
 
 const APP_DIR = path.join(__dirname, '..');
 const OVERALL_TIMEOUT_MS = 90000;
@@ -60,6 +69,14 @@ function makeStore() {
           baseUrl: 'http://127.0.0.1:9/v1',
           apiKey: 'test-key',
           models: ['img-model-x']
+        },
+        // 第三个给语义检索用 —— 向量模型又是一组独立配置
+        {
+          id: 'p-emb',
+          name: '冒烟测试向量',
+          baseUrl: 'http://127.0.0.1:9/v1',
+          apiKey: 'test-key',
+          models: ['emb-model-x']
         }
       ],
       activeProviderId: 'p-test',
@@ -154,6 +171,7 @@ let chatPayloads = []; // 每次发给模型的完整消息（按顺序留着，
 let lastExport = null; // 最后一次「导出」交给主进程的东西
 const exportedPayloads = []; // 按顺序留所有导出，宿主侧断言用
 const imageRequests = []; // 生图请求参数
+const ragRequests = []; // 语义检索请求参数
 
 function remember(channel, payload) {
   calls.push(channel);
@@ -164,6 +182,56 @@ function remember(channel, payload) {
 
 function registerStubs() {
   // --- 设置 ---
+  // 语义检索：不调真接口，但**排序用的是真的 rankBySimilarity**。
+  // 假的「向量」按关键词落在哪个桶来构造，这样相似度是可控、可预期的：
+  //   提到「泰坦 / 那些神」的落第 0 维，提「门 / 钟」的落第 1 维……
+  // 于是「问『那些神』→ 捞出写了『十二泰坦』的设定」这件事是真排序算出来的。
+  const fakeEmbed = (text) => {
+    const t = String(text || '');
+    return new Float32Array([
+      /泰坦|那些神|神仙/.test(t) ? 1 : 0,
+      /门|钟/.test(t) ? 1 : 0,
+      /金币|钱/.test(t) ? 1 : 0,
+      0.1
+    ]);
+  };
+
+  ipcMain.handle('rag:recall', (_event, payload) => {
+    remember('rag:recall');
+    ragRequests.push(clone(payload));
+
+    const req = payload || {};
+    const convo = store.conversations.find((c) => c.id === req.convoId);
+
+    // 候选收集用真实现（main/vectors.js 里的纯函数）—— 连「只捞绑定的书」
+    // 和「跳过最近几条」这两条规则也一起验了
+    const candidates = collectCandidates({
+      messages: convo ? convo.messages : [],
+      recentCount: req.recentCount,
+      books: store.worldbooks,
+      worldbookIds: req.worldbookIds
+    }).map((c) => ({ ...c, vector: fakeEmbed(c.text) }));
+
+    const ranked = rankBySimilarity(fakeEmbed(req.query), candidates, {
+      topK: req.topK,
+      minScore: req.minScore
+    });
+
+    return {
+      ok: true,
+      items: ranked.map((r) => ({
+        kind: r.kind,
+        title: r.title || '',
+        role: r.role || '',
+        text: r.text,
+        score: Number(r.score.toFixed(4))
+      })),
+      embedded: 0,
+      indexed: candidates.length,
+      total: candidates.length
+    };
+  });
+
   ipcMain.handle('settings:get', () => ({
     settings: clone(store.settings),
     models: [],
@@ -734,6 +802,161 @@ function probeImageGen(result) {
   });
 }
 
+/**
+ * 向量工具的单测。直接打 main/vectors.js —— 相似度算错了，整套语义检索就是
+ * 「随机捞几条塞进上下文」，而且界面上完全看不出来。
+ */
+function probeVectors(result) {
+  const push = (name, pass, detail) => result.results.push({ name, pass: !!pass, detail: detail || '' });
+
+  // 编解码往返
+  const original = new Float32Array([0.125, -0.5, 0.75, 1e-3]);
+  const back = decodeVector(encodeVector(original));
+  push(
+    '向量：编码再解码能原样回来',
+    back && back.length === original.length && original.every((v, i) => Math.abs(back[i] - v) < 1e-7),
+    back ? `[${Array.from(back).join(', ')}]` : '解码失败'
+  );
+
+  // base64 比 JSON 数字省得多
+  push(
+    '向量：存成 base64 比 JSON 数字省',
+    encodeVector(original).length < JSON.stringify(Array.from(original)).length,
+    `base64 ${encodeVector(original).length} 字节 vs JSON ${JSON.stringify(Array.from(original)).length} 字节`
+  );
+
+  push('向量：坏数据解码返回 null', decodeVector('不是base64!!') === null && decodeVector('') === null);
+
+  // 余弦相似度：同向 1、正交 0、反向 -1
+  const a = new Float32Array([1, 0]);
+  const b = new Float32Array([0, 1]);
+  const c = new Float32Array([-1, 0]);
+  push(
+    '向量：余弦相似度对（同向 1 / 正交 0 / 反向 -1）',
+    Math.abs(cosineSimilarity(a, a) - 1) < 1e-6 &&
+      Math.abs(cosineSimilarity(a, b)) < 1e-6 &&
+      Math.abs(cosineSimilarity(a, c) + 1) < 1e-6,
+    [cosineSimilarity(a, a), cosineSimilarity(a, b), cosineSimilarity(a, c)].join(' / ')
+  );
+
+  // 没归一化的向量也要能比（各家服务商不一样，这也是当初选余弦的原因）
+  const un = new Float32Array([10, 0]);
+  push('向量：没归一化也算得对', Math.abs(cosineSimilarity(a, un) - 1) < 1e-6, String(cosineSimilarity(a, un)));
+  push('向量：维度不一样返回 0（不瞎算）', cosineSimilarity(new Float32Array([1, 2, 3]), a) === 0);
+
+  // 排序：topK / 阈值 / 排除
+  const candidates = [
+    { key: 'high', vector: new Float32Array([1, 0, 0.1]) },
+    { key: 'mid', vector: new Float32Array([0.7, 0.7, 0.1]) },
+    { key: 'low', vector: new Float32Array([0, 1, 0.1]) },
+    { key: 'excluded', vector: new Float32Array([1, 0, 0.1]) }
+  ];
+  const ranked = rankBySimilarity(new Float32Array([1, 0, 0.1]), candidates, { topK: 2, minScore: 0.9 });
+  push(
+    '向量：topK 和阈值都生效',
+    ranked.length === 2 && ranked[0].key === 'high' && ranked[1].key === 'excluded' && ranked[0].score >= ranked[1].score,
+    ranked.map((r) => `${r.key}=${r.score.toFixed(3)}`).join(', ')
+  );
+
+  const excluded = rankBySimilarity(new Float32Array([1, 0, 0.1]), candidates, {
+    topK: 5,
+    minScore: 0,
+    exclude: new Set(['excluded'])
+  });
+  push(
+    '向量：exclude 里的不会被捞回来',
+    excluded.length === 3 && !excluded.some((r) => r.key === 'excluded'),
+    excluded.map((r) => r.key).join(', ')
+  );
+
+  push(
+    '向量：全都不够像时宁可一条都不给',
+    rankBySimilarity(new Float32Array([0, 0, 1]), candidates, { topK: 4, minScore: 0.9 }).length === 0,
+    ''
+  );
+
+  push('向量：内容指纹随内容变', hashText('甲') !== hashText('乙') && hashText('甲') === hashText('甲'));
+
+  // 候选收集：跳过最近几条、只捞绑定的书、空内容不要
+  const collected = collectCandidates({
+    messages: [
+      { role: 'user', content: '很早以前说过的话' },
+      { role: 'assistant', content: '很早以前的回复' },
+      { role: 'user', content: '刚说的这句' },
+      { role: 'user', content: '   ' },
+      { role: 'error', content: '出错了' }
+    ],
+    recentCount: 2,
+    books: [
+      { id: 'b1', entries: [{ id: 'e1', title: '甲条', content: '甲的内容' }, { id: 'e2', title: '空条', content: '  ' }] },
+      { id: 'b2', entries: [{ id: 'e9', title: '没绑的书', content: '不该被捞' }] }
+    ],
+    worldbookIds: ['b1']
+  });
+  const keys = collected.map((c) => c.key).join(' | ');
+  push(
+    '向量：候选收集跳过最近几条消息',
+    !collected.some((c) => c.text === '刚说的这句') && collected.some((c) => c.text === '很早以前说过的话'),
+    keys
+  );
+  push(
+    '向量：候选收集只捞绑定了的那本书',
+    collected.some((c) => c.text === '甲的内容') && !collected.some((c) => c.text === '不该被捞'),
+    keys
+  );
+  push(
+    '向量：空白内容和 error 消息都不收',
+    !collected.some((c) => c.text === '出错了') && collected.every((c) => c.text.trim()),
+    keys
+  );
+}
+
+/**
+ * 语义检索注入链路的验证（宿主侧，看真正发出去的消息）。
+ * 光看界面上「有没有反应」是验不出这个功能的 —— 它本来就没有可见反应。
+ */
+function probeRag(result) {
+  const fromSystem = (messages) =>
+    (messages || []).find((m) => m.role === 'system' && String(m.content || '').includes('[可能相关的往事]'));
+
+  const withRag = chatPayloads.map(fromSystem).filter(Boolean);
+  const section = withRag.length ? String(withRag[withRag.length - 1].content) : '';
+
+  result.results.push({
+    name: 'RAG：把相关的设定捞回来注入了',
+    pass: !!section && section.includes('十二泰坦'),
+    detail: section ? section.replace(/\s+/g, ' ').slice(0, 70) : '所有请求里都没有 [可能相关的往事] 这一段'
+  });
+
+  result.results.push({
+    name: 'RAG：不像的没被硬凑进来',
+    pass: !!section && !section.includes('这条不该被带进来'),
+    detail: section.includes('这条不该被带进来') ? '把不相关的条目也塞进来了' : ''
+  });
+
+  result.results.push({
+    name: 'RAG：注入的是一段独立的 system 消息',
+    pass: !!section && section.trim().startsWith('[可能相关的往事]'),
+    detail: section ? section.trim().slice(0, 20) : '没找到这一段'
+  });
+
+  // 负向对照：关掉之后不该再出现
+  const last = chatPayloads[chatPayloads.length - 1];
+  result.results.push({
+    name: 'RAG：关掉之后就不再注入了',
+    pass: !fromSystem(last),
+    detail: fromSystem(last) ? '关了还在注入' : ''
+  });
+
+  // 渲染层确实把配置传下去了
+  const req = ragRequests[0];
+  result.results.push({
+    name: 'RAG：检索用的是「向量」那组配置',
+    pass: !!req && req.providerId === 'p-emb' && req.model === 'emb-model-x',
+    detail: req ? `${req.providerId}/${req.model}` : '没收到检索请求'
+  });
+}
+
 app.whenReady().then(async () => {
   registerStubs();
 
@@ -787,6 +1010,8 @@ app.whenReady().then(async () => {
       probeRecursion(result);
       probeImageMessage(result);
       probeImageGen(result);
+      probeVectors(result);
+      probeRag(result);
       await probeHover(win, result);
     } catch (err) {
       crashed = '宿主侧验证失败：' + ((err && err.message) || err);

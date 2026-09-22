@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('barbara', {
   pickImage: (options) => ipcRenderer.invoke('images:pick', options),
   openImage: (dataUrl) => ipcRenderer.invoke('images:open', dataUrl),
   generateImage: (payload) => ipcRenderer.invoke('images:generate', payload),
+  ragRecall: (payload) => ipcRenderer.invoke('rag:recall', payload),
 
   // --- 对话 ---
   sendChat: (payload) => ipcRenderer.invoke('chat:send', payload),
