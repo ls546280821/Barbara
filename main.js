@@ -1589,8 +1589,12 @@ function registerIpc() {
       .map((m) => String(m.content))
       .join('\n');
 
-    // 世界书词条只由「会话绑定了哪本书」决定。
-    // 角色库里的角色单独聊天时不会因为「它属于某本书」而注入任何设定。
+    // 要注入哪些书，完全由渲染层传进来的 id 决定 —— 这里不做任何「按角色自动带上」的判断。
+    // 渲染层的 effectiveWorldbookIds 负责算出这批 id：
+    //   · 会话绑了世界书（含「进入世界」）→ 只用会话的
+    //   · 会话没绑 → 才用角色自带的那几本（前提是那张卡的开关是开的）
+    // 换句话说，角色库里的角色单独聊天**是会**注入设定的；
+    // 早前那句「不会注入任何世界书」是旧设计，已经不成立。
     const convoIds = Array.isArray(request.worldbookIds) ? request.worldbookIds : [];
     const entries = worldbookEntriesByIds(convoIds);
 
