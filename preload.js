@@ -69,5 +69,6 @@ contextBridge.exposeInMainWorld('barbara', {
 
   // --- 杂项 ---
   copyText: (text) => ipcRenderer.invoke('util:copy', text),
+  saveFile: (payload) => ipcRenderer.invoke('util:saveFile', payload),
   openDataFolder: (which) => ipcRenderer.invoke('util:openPath', which)
 });

@@ -112,6 +112,9 @@ export const el = {
   btnNewChar: $('btn-new-char'),
   btnDelChar: $('btn-del-char'),
   btnSaveChar: $('btn-save-char'),
+  btnExportChar: $('btn-export-char'),
+  btnExportConvo: $('btn-export-convo'),
+  btnExportWb: $('btn-export-wb'),
   btnAddAttr: $('btn-add-attr'),
   charEmpty: $('char-empty'),
   charForm: $('char-form'),
@@ -149,6 +152,7 @@ export const el = {
     sendOnEnter: $('s-sendonenter'),
     showDate: $('s-showdate'),
     showUsage: $('s-showusage'),
+    wbDepth: $('s-wb-depth'),
     commonAttrs: $('s-commonattrs')
   },
   p: {
@@ -172,6 +176,7 @@ export const el = {
     entryList: $('wb-entry-list'),
     btnPreview: $('btn-preview-wb'),
     btnNewEntry: $('btn-new-entry'),
+    btnExport: $('btn-export-wb'),
     btnDelBook: $('btn-del-worldbook'),
     charList: $('wb-char-list'),
     btnAddChars: $('btn-add-wb-chars'),
@@ -188,6 +193,7 @@ export const el = {
       keys2: $('wb-e-keys2'),
       logic: $('wb-e-logic'),
       constant: $('wb-e-constant'),
+      recursive: $('wb-e-recursive'),
       enabled: $('wb-e-enabled')
     },
     btnDelEntry: $('btn-del-entry'),

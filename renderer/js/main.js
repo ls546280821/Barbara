@@ -156,6 +156,12 @@ function convoWorldbookIds(convo) {
  */
 const WORLDBOOK_SCAN_DEPTH = 6;
 
+/** 递归扫描最多连锁几层（设置里调，0 = 关掉递归） */
+function recursiveDepthSetting() {
+  const value = Number((state.settings || {}).worldbookRecursiveDepth);
+  return Number.isFinite(value) && value >= 0 && value <= 5 ? Math.floor(value) : 3;
+}
+
 async function matchWorldbookSection(convo) {
   // 世界书词条只由「会话绑定了哪本书」决定。
   // 角色库里的角色单独聊天时不注入任何世界书，避免两个上下文串味。
@@ -170,6 +176,7 @@ async function matchWorldbookSection(convo) {
     const result = await api.previewWorldbook({
       worldbookIds: allIds,
       scanDepth: WORLDBOOK_SCAN_DEPTH,
+      recursiveDepth: recursiveDepthSetting(),
       messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
     });
     return (result && result.section) || '';
@@ -673,6 +680,14 @@ function messageNode(message, index, character, labels) {
       showToast('已复制到剪贴板', 'ok');
     });
     actions.appendChild(copy);
+
+    const edit = document.createElement('button');
+    edit.className = 'mini-btn';
+    edit.textContent = '编辑';
+    edit.title = '直接改这条消息的内容';
+    edit.setAttribute('aria-label', '编辑这条消息');
+    edit.addEventListener('click', () => editMessage(index));
+    actions.appendChild(edit);
   }
 
   if (!isUser) {
@@ -683,6 +698,19 @@ function messageNode(message, index, character, labels) {
     regen.setAttribute('aria-label', isError ? '重新发送上一条消息' : '重新生成这条回复');
     regen.addEventListener('click', () => regenerateFrom(index));
     actions.appendChild(regen);
+
+    // 「继续」只对最后一条有意义 —— 中间的回复后面早就接上别的话了
+    const convo = activeConvo();
+    const isLast = !!convo && index === convo.messages.length - 1;
+    if (isLast && String(message.content || '').trim()) {
+      const cont = document.createElement('button');
+      cont.className = 'mini-btn';
+      cont.textContent = '继续';
+      cont.title = '让 AI 接着这条往下写（回复被截断时用）';
+      cont.setAttribute('aria-label', '继续生成');
+      cont.addEventListener('click', continueLastMessage);
+      actions.appendChild(cont);
+    }
   }
 
   // 删除这一条消息（会先弹确认框）
@@ -2133,6 +2161,255 @@ function closeAppearanceModal() {
 }
 
 // ---------------------------------------------------------------------------
+//  导出
+//
+//  三种：角色卡（PNG / JSON）、世界书（JSON）、当前会话（Markdown）。
+//  格式都对齐「导入」那条链路能读的形状，所以导出的东西能再导回来，
+//  酒馆那边也认（角色卡是 v2 规范，世界书是 lorebook 规范）。
+// ---------------------------------------------------------------------------
+
+/** 文件名里不能出现的字符（Windows 最严），换成下划线 */
+function safeFileName(name) {
+  const base = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '_');
+  return base.slice(0, 60) || 'export';
+}
+
+/**
+ * UTF-8 文本 → base64。
+ * 不能用裸 btoa：它只吃 Latin-1，中文会直接抛错；先按 UTF-8 取字节再 base64。
+ */
+function base64Utf8(text) {
+  const bytes = new TextEncoder().encode(String(text));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/**
+ * 导出用的角色卡（酒馆 v2 规范）。
+ * 自家多出来的字段（年龄/性别/种族/属性）塞进 extensions.barbara ——
+ * 规范里 extensions 就是给各家放私有数据的，酒馆会原样保留，我们自己也能读回来。
+ */
+function characterCardPayload(character) {
+  return {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: character.name || '',
+      description: character.description || '',
+      personality: character.personality || '',
+      scenario: character.scenario || '',
+      first_mes: character.firstMes || '',
+      mes_example: character.mesExample || '',
+      creator_notes: character.creatorNotes || '',
+      system_prompt: character.systemPrompt || '',
+      post_history_instructions: character.postHistoryInstructions || '',
+      tags: Array.isArray(character.tags) ? character.tags : [],
+      alternate_greetings: [],
+      character_book: null,
+      creator: '',
+      character_version: '',
+      extensions: {
+        barbara: {
+          age: character.age || '',
+          gender: character.gender || '',
+          race: character.race || '',
+          attributes: characterAttrs(character)
+        }
+      }
+    }
+  };
+}
+
+/** 世界书导出成酒馆 lorebook 的形状（导入那边认的就是这个） */
+function worldbookPayload(book) {
+  const entries = {};
+  (book.entries || []).forEach((entry, index) => {
+    entries[String(index)] = {
+      uid: index,
+      comment: entry.title || '',
+      key: Array.isArray(entry.keys) ? entry.keys : [],
+      keysecondary: Array.isArray(entry.secondaryKeys) ? entry.secondaryKeys : [],
+      content: entry.content || '',
+      constant: entry.constant === true,
+      selective: Array.isArray(entry.secondaryKeys) && entry.secondaryKeys.length > 0,
+      selectiveLogic: entry.selectiveLogic || 'AND_ANY',
+      order: Number.isFinite(entry.order) ? entry.order : 100,
+      probability: Number.isFinite(entry.probability) ? entry.probability : 100,
+      disable: entry.enabled === false,
+      // 递归：写法两边都给 —— 酒馆认 excludeRecursion（true = 不参与递归），
+      // 我们自己认 recursive。这样导出的书酒馆能用，我们自己再导回来也不丢这个开关。
+      excludeRecursion: entry.recursive !== true,
+      recursive: entry.recursive === true,
+      matchWholeWords: entry.matchWholeWords === true,
+      caseSensitive: entry.caseSensitive === true
+    };
+  });
+
+  return { name: book.name || '未命名世界', description: book.description || '', entries };
+}
+
+/** 当前会话导出成 Markdown */
+function conversationMarkdown(convo) {
+  const lines = [];
+  const character = characterForConvo(convo);
+  const player = convoPlayer(convo);
+
+  lines.push(`# ${convo.title || '对话'}`);
+  lines.push('');
+  const meta = [];
+  if (character) meta.push(`角色：${character.name}`);
+  if (player && player.name) meta.push(`我：${player.name}`);
+  const book = convoWorldbookIds(convo)
+    .map((id) => worldbookById(id))
+    .find(Boolean);
+  if (book) meta.push(`世界：${book.name}`);
+  meta.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
+  lines.push(`> ${meta.join(' · ')}`);
+  lines.push('');
+
+  // 状态面板单独列一段：正文里那几行注入时会被剥掉，导出的快照留着更有用
+  const panelFields = convoPanelFields(convo);
+  const panel = convoPanel(convo);
+  const filled = panelFields.filter((n) => String(panel[n] || '').trim());
+  if (filled.length) {
+    lines.push('## 当前状态');
+    lines.push('');
+    for (const name of filled) lines.push(`- ${name}：${panel[name]}`);
+    lines.push('');
+  }
+
+  lines.push('## 对话');
+  lines.push('');
+  for (const message of convo.messages || []) {
+    const content = String(message.content || '').trim();
+    if (!content) continue;
+    if (message.role === 'user') lines.push(`**${player && player.name ? player.name : userName()}：**`);
+    else if (message.role === 'error') lines.push('**（出错了）**');
+    else lines.push(`**${character ? character.name : speakerName(convo)}：**`);
+    lines.push('');
+    lines.push(content);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/** 角色头像 → PNG 数据（没有头像就画一张带首字母的占位图） */
+function avatarPngDataUrl(character) {
+  return new Promise((resolve) => {
+    const size = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    const placeholder = () => {
+      ctx.fillStyle = '#4a86e8';
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `600 ${Math.round(size * 0.42)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText((character.name || '?').slice(0, 1), size / 2, size / 2 + 8);
+      resolve(canvas.toDataURL('image/png'));
+    };
+
+    if (!character.avatar) {
+      placeholder();
+      return;
+    }
+
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const side = Math.min(img.width, img.height);
+        ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+        const out = canvas.toDataURL('image/png');
+        if (out.startsWith('data:image/png')) resolve(out);
+        else placeholder();
+      } catch (err) {
+        placeholder();
+      }
+    };
+    img.onerror = placeholder;
+    img.src = character.avatar;
+  });
+}
+
+/** 统一的导出收尾：调保存框、报结果 */
+async function saveExport(payload) {
+  let result;
+  try {
+    result = await api.saveFile(payload);
+  } catch (err) {
+    showToast((err && err.message) || '导出失败', 'error');
+    return;
+  }
+
+  if (!result || result.canceled) return;
+  if (result.error) {
+    showToast(`没能写出文件：${result.error}`, 'error');
+    return;
+  }
+  showToast('已导出到磁盘', 'ok');
+}
+
+/** 导出当前编辑的角色卡：存 .png 就是带数据的酒馆卡，存 .json 就是纯数据 */
+async function exportCharacter() {
+  const character = editorCharacterById(editingCharacterId);
+  if (!character) return;
+
+  const name = safeFileName(character.name);
+  const json = JSON.stringify(characterCardPayload(character), null, 2);
+  const png = await avatarPngDataUrl(character);
+
+  await saveExport({
+    title: '导出角色卡',
+    fileName: `${name}.png`,
+    filters: [
+      { name: 'PNG 角色卡（带数据，酒馆可直接导入）', extensions: ['png'] },
+      { name: 'JSON 角色卡（纯数据，方便改）', extensions: ['json'] }
+    ],
+    text: json,
+    base64: String(png).split(',')[1] || '',
+    pngText: { keyword: 'chara', text: base64Utf8(json) }
+  });
+}
+
+/** 导出当前编辑的世界书 */
+async function exportWorldbook() {
+  const book = currentWorldbook();
+  if (!book) return;
+
+  await saveExport({
+    title: '导出世界书',
+    fileName: `${safeFileName(book.name)}.json`,
+    filters: [{ name: '世界书 JSON（酒馆可直接导入）', extensions: ['json'] }],
+    text: JSON.stringify(worldbookPayload(book), null, 2)
+  });
+}
+
+/** 导出当前会话为 Markdown */
+async function exportConversation() {
+  const convo = activeConvo();
+  if (!convo || !(convo.messages || []).length) {
+    showToast('当前会话还是空的', 'error');
+    return;
+  }
+
+  await saveExport({
+    title: '导出对话',
+    fileName: `${safeFileName(convo.title || '对话')}.md`,
+    filters: [
+      { name: 'Markdown', extensions: ['md'] },
+      { name: '纯文本', extensions: ['txt'] }
+    ],
+    text: conversationMarkdown(convo)
+  });
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -2332,6 +2609,154 @@ async function sendMessage(text) {
 }
 
 /** 调一次模型，把回复流式写进界面 */
+/**
+ * 就地编辑一条消息：把气泡内容换成 textarea，保存/取消。
+ *
+ * 以前改个错字只能「删除 → 重发」，而重发会换一整条新回复。
+ * 这里直接改原文，改完接着聊，历史也就跟着变了（发出去的是改后的版本）。
+ */
+function editMessage(index) {
+  const convo = activeConvo();
+  if (!convo || state.streaming) return;
+
+  const message = convo.messages[index];
+  if (!message || message.role === 'error') return;
+
+  const node = el.messages.querySelector(`.msg[data-index="${index}"] .msg-content`);
+  const bubble = node ? node.parentElement : null;
+  if (!node || !bubble) return;
+
+  const original = String(message.content || '');
+
+  const textarea = h('textarea', {
+    class: 'msg-edit-box',
+    spellcheck: 'false',
+    'aria-label': '编辑消息内容'
+  });
+  textarea.value = original;
+
+  const finish = (save) => {
+    if (save) {
+      const next = textarea.value;
+      if (!next.trim()) {
+        showToast('内容不能为空 —— 想删掉这条就用「删除」', 'error');
+        textarea.focus();
+        return;
+      }
+      message.content = next;
+      convo.updatedAt = now();
+      // 助手消息里可能写着状态栏，改完要重新扫一遍面板
+      if (message.role === 'assistant') syncConvoPanel(convo);
+      if (message.role === 'assistant') syncPlayerNameFromPanel(convo);
+      persistConversations(0);
+      showToast('已保存', 'ok');
+    }
+    // 保存或取消都靠重绘来收拾现场
+    renderAll({ forceScroll: false });
+  };
+
+  const save = button({ class: 'btn btn-primary btn-sm', text: '保存', onClick: () => finish(true) });
+  const cancel = button({ class: 'btn btn-ghost btn-sm', text: '取消', onClick: () => finish(false) });
+
+  textarea.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      finish(true);
+    }
+  });
+
+  clear(node);
+  node.appendChild(textarea);
+  node.appendChild(h('div', { class: 'msg-edit-actions' }, save, cancel));
+
+  textarea.focus();
+  // 光标放到末尾，接着改最顺手
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+  // 编辑框比原来的气泡高，展开后可能把「保存 / 取消」顶到视口外面去。
+  // 注意要滚**整个内容块**（node）：只滚 textarea 的话，它自己已经完整可见了，
+  // scrollIntoView 按规范就该什么都不做 —— 被切掉的其实是它下面那行按钮。
+  node.scrollIntoView({ block: 'nearest' });
+}
+
+/** 「继续」时追加在提示词末尾的引导。只进这一次请求，不存进会话 */
+const CONTINUE_NUDGE = '（接着你上一条回复继续往下写。不要重复已经写过的内容，也不要重新开头。）';
+
+/**
+ * 「继续」：让模型接着最后一条回复往下写（回复被 maxTokens 截断时用）。
+ *
+ * 省事的地方在于**不新建消息**：流式分片本来就是「把增量加到 messages 里最后一条、
+ * 再画到它的节点上」，所以只要不加新消息，它自然就续写在原文后面了。
+ */
+async function continueLastMessage() {
+  const convo = activeConvo();
+  if (!convo) return;
+  if (state.streaming) {
+    showToast('正在生成，等它写完再继续');
+    return;
+  }
+
+  const last = convo.messages[convo.messages.length - 1];
+  if (!last || last.role !== 'assistant' || !String(last.content || '').trim()) {
+    showToast('只能在 AI 的回复后面接着写', 'error');
+    return;
+  }
+
+  const endpoint = ensureConvoEndpoint(convo);
+  if (!endpoint) {
+    showToast('还没有配置模型服务', 'error');
+    return;
+  }
+
+  const worldbookSection = await matchWorldbookSection(convo);
+  const requestId = uid();
+  state.requestId = requestId;
+
+  const messages = buildApiMessages(convo, worldbookSection);
+  messages.push({ role: 'user', content: CONTINUE_NUDGE });
+
+  const index = convo.messages.length - 1;
+  const bubble = el.messages.querySelector(`.msg[data-index="${index}"] .bubble`);
+  if (bubble) bubble.classList.add('streaming');
+
+  const before = String(last.content || '');
+  setStreaming(true);
+
+  try {
+    const response = await api.sendChat({
+      requestId,
+      providerId: endpoint.provider.id,
+      model: endpoint.model,
+      messages
+    });
+
+    if (!response || response.ok !== true) {
+      throw new Error((response && response.error) || '调用失败');
+    }
+    if (response.usage) state.usage = response.usage;
+
+    // 有的服务商不推流式分片，直接给全文 —— 那种情况分片处理器一次都没跑过，
+    // 这里补一次追加（正文没变就说明没收到过分片）
+    if (String(last.content || '') === before && String(response.content || '').trim()) {
+      last.content = before + response.content;
+    }
+  } catch (err) {
+    showToast((err && err.message) || '继续失败', 'error');
+  } finally {
+    streamPainter.stop();
+    setStreaming(false);
+    state.requestId = null;
+    convo.updatedAt = now();
+    syncConvoPanel(convo);
+    renderAll({ forceScroll: true });
+    persistConversations();
+    el.input.focus();
+  }
+}
+
 async function requestCompletion(convo) {
   const endpoint = ensureConvoEndpoint(convo);
   if (!endpoint) {
@@ -2468,6 +2893,9 @@ function fillSettingsForm(settings) {
   el.s.sendOnEnter.checked = settings.sendOnEnter !== false;
   el.s.showDate.checked = settings.showDate !== false;
   el.s.showUsage.checked = settings.showUsage !== false;
+  el.s.wbDepth.value = String(
+    Number.isFinite(Number(settings.worldbookRecursiveDepth)) ? Number(settings.worldbookRecursiveDepth) : 3
+  );
   el.s.commonAttrs.value = (Array.isArray(settings.commonAttributes) ? settings.commonAttributes : []).join(', ');
 }
 
@@ -2617,6 +3045,10 @@ function readSettingsForm() {
     sendOnEnter: el.s.sendOnEnter.checked,
     showDate: el.s.showDate.checked,
     showUsage: el.s.showUsage.checked,
+    worldbookRecursiveDepth: (() => {
+      const depth = Number(el.s.wbDepth.value);
+      return Number.isFinite(depth) ? Math.max(0, Math.min(5, Math.floor(depth))) : 3;
+    })(),
     // 和「服务商模型列表」一样是「分隔符拆开的字符串列表」，直接复用那个解析
     commonAttributes: parseModels(el.s.commonAttrs.value).slice(0, 40)
   };
@@ -2792,6 +3224,7 @@ function stashEntryForm() {
   entry.probability = isFinite(prob) ? Math.max(0, Math.min(100, Math.floor(prob))) : 100;
 
   entry.constant = el.wb.e.constant.checked;
+  entry.recursive = el.wb.e.recursive.checked;
   entry.enabled = el.wb.e.enabled.checked;
 }
 
@@ -2850,6 +3283,7 @@ function fillEntryForm(entry) {
   el.wb.e.keys2.value = (entry.secondaryKeys || []).join(', ');
   el.wb.e.logic.value = entry.selectiveLogic || 'AND_ANY';
   el.wb.e.constant.checked = entry.constant === true;
+  el.wb.e.recursive.checked = entry.recursive === true;
   el.wb.e.enabled.checked = entry.enabled !== false;
 
   showEntryForm(true);
@@ -3338,6 +3772,7 @@ async function previewWorldbook() {
     const result = await api.previewWorldbook({
       worldbookIds: [book.id],
       scanDepth: WORLDBOOK_SCAN_DEPTH,
+      recursiveDepth: recursiveDepthSetting(),
       messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
     });
 
@@ -3348,7 +3783,10 @@ async function previewWorldbook() {
     }
 
     const names = hits.map((h) => h.title).join('、');
-    showToast(`「${book.name}」命中 ${hits.length} 条：${names}`);
+    // 递归带进来的单独说一声 —— 不然用户只会觉得「怎么突然多塞了这么多设定」
+    const viaChain = Number(result && result.recursiveCount) || 0;
+    const tail = viaChain ? `（其中 ${viaChain} 条是递归带进来的）` : '';
+    showToast(`「${book.name}」命中 ${hits.length} 条：${names}${tail}`);
   } catch (err) {
     console.error('预览失败', err);
     showToast('预览失败', 'error');
@@ -3442,6 +3880,9 @@ function bindEvents() {
   el.c.btnAttrPasteApply.addEventListener('click', applyAttrPaste);
 
   el.btnDelChar.addEventListener('click', deleteCharacter);
+  el.btnExportChar.addEventListener('click', exportCharacter);
+  el.btnExportConvo.addEventListener('click', exportConversation);
+  el.wb.btnExport.addEventListener('click', exportWorldbook);
   el.btnImportCard.addEventListener('click', importCards);
 
   // 点头像换图 / 清除头像

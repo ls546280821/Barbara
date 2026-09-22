@@ -53,6 +53,7 @@
           <button id="btn-perspective" class="btn btn-ghost btn-sm" aria-label="打开视角设置">视角</button>
           <button id="btn-memory" class="btn btn-ghost btn-sm" aria-label="打开记忆管理">记忆<span id="memory-count" class="memory-badge hidden"></span></button>
           <button id="btn-copy-all" class="btn btn-ghost btn-sm" aria-label="复制整段对话">复制全文</button>
+          <button id="btn-export-convo" class="btn btn-ghost btn-sm" aria-label="把当前对话导出成 Markdown">导出</button>
           <button id="btn-clear" class="btn btn-ghost btn-sm" aria-label="清空当前对话">清空对话</button>
           <button id="btn-stop" class="btn btn-danger btn-sm hidden" aria-label="停止生成回复">停止生成</button>
         </div>
@@ -317,6 +318,15 @@
               <span class="check-desc">在输入框右下角显示本次对话消耗的 token 数</span>
             </span>
           </label>
+
+          <label class="field">
+            <span class="field-label">世界书递归深度</span>
+            <input id="s-wb-depth" type="number" min="0" max="5" step="1" aria-label="世界书递归深度" />
+            <span class="field-help">
+              勾了「递归」的世界书条目，命中后还能再带出别的条目，最多连锁几层。<br />
+              0 = 完全关掉递归。层数越多带进来的设定越多，<b>token 也越多</b>。
+            </span>
+          </label>
         </section>
 
         <section class="panel-section">
@@ -506,6 +516,7 @@
       <footer class="modal-foot">
         <span id="char-foot-hint" class="foot-hint">角色卡只保存在你自己电脑上</span>
         <div class="foot-actions">
+          <button id="btn-export-char" class="btn btn-ghost" type="button" title="存成 PNG 卡（酒馆可直接导入）或 JSON">导出</button>
           <button id="btn-del-char" class="btn btn-danger" type="button">删除角色</button>
           <button id="btn-save-char" class="btn btn-primary" type="button">保存角色</button>
         </div>
@@ -634,6 +645,17 @@
                 </span>
               </label>
               <label class="check">
+                <input id="wb-e-recursive" type="checkbox" />
+                <span class="check-text">
+                  <span class="check-title">递归</span>
+                  <span class="check-desc">
+                    这条命中后，把它的正文也拿去做下一轮匹配 —— 正文里提到的词能再带出别的条目，
+                    一路连锁（最多几层在「设置 → 行为」里调）<br />
+                    <b>会明显增加 token</b>，只给「总览 / 索引」这类条目开
+                  </span>
+                </span>
+              </label>
+              <label class="check">
                 <input id="wb-e-enabled" type="checkbox" checked />
                 <span class="check-text">
                   <span class="check-title">启用这条条目</span>
@@ -652,6 +674,7 @@
       <footer class="modal-foot">
         <span id="wb-foot-hint" class="foot-hint">世界书只保存在你自己电脑上</span>
         <div class="foot-actions">
+          <button id="btn-export-wb" class="btn btn-ghost" type="button" title="导出成酒馆能直接导入的 JSON">导出</button>
           <button id="btn-close-worldbooks-2" class="btn btn-ghost" type="button">关闭</button>
         </div>
       </footer>

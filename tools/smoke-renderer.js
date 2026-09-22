@@ -454,7 +454,87 @@ await scenario('聊天：发送与回复', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 11：对话窗口外观（字号 / 加粗颜色 / 背景图）
+//  场景 11：消息 —— 就地编辑 + 继续生成
+// ---------------------------------------------------------------------------
+await scenario('消息：编辑与继续', async () => {
+  const assistantNodes = () => $$('#messages .msg.assistant');
+  const lastNode = () => assistantNodes().pop();
+  const actionsOf = (node) => Array.from(node.querySelectorAll('.msg-actions .mini-btn')).map((b) => b.textContent.trim());
+
+  check('有 AI 回复可以操作', assistantNodes().length >= 1, `实际 ${assistantNodes().length} 条`);
+
+  // --- 「继续」只该出现在最后一条，中间的回复后面早就接上别的话了 ---
+  check('最后一条上有「继续」', actionsOf(lastNode()).includes('继续'), JSON.stringify(actionsOf(lastNode())));
+  if (assistantNodes().length > 1) {
+    const first = assistantNodes()[0];
+    check('中间那条没有「继续」', !actionsOf(first).includes('继续'), JSON.stringify(actionsOf(first)));
+  }
+  check('每条都有「编辑」', actionsOf(lastNode()).includes('编辑'), JSON.stringify(actionsOf(lastNode())));
+
+  // --- 继续：应该是「追加」，不是「替换」---
+  const before = lastNode().querySelector('.msg-content').textContent;
+  click(buttonByText(lastNode(), '继续'));
+  await waitFor('内容变长', () => {
+    const node = lastNode();
+    return node && node.querySelector('.msg-content').textContent.length > before.length;
+  }, 8000);
+  await waitFor('流式结束', () => byId('btn-send').disabled === false, 8000);
+
+  const after = lastNode().querySelector('.msg-content').textContent;
+  check('继续是追加而不是替换', after.startsWith(before) && after.length > before.length, `${before.length} 字 → ${after.length} 字`);
+  check('原来那段一个字没少', after.slice(0, before.length) === before);
+
+  // --- 编辑：先试「取消」---
+  click(buttonByText(lastNode(), '编辑'));
+  await waitFor('出现编辑框', () => !!lastNode().querySelector('.msg-edit-box'));
+  // 编辑框里必须是**原文**（带 ** == 这些标记），不能是渲染后的文本 ——
+  // 给渲染后的文本一保存，标记就没了
+  const boxValue = lastNode().querySelector('.msg-edit-box').value;
+  check('编辑框里给的是原文而不是渲染结果', boxValue.includes('**这是加粗**') && boxValue.includes('==这是高亮=='), boxValue.slice(0, 40));
+  check('原文和屏幕上显示的长度不一样（正好说明给的是源文本）', boxValue.length !== after.length, `源 ${boxValue.length} 字 / 显示 ${after.length} 字`);
+
+  // 编辑框比原来的气泡高，展开后「保存 / 取消」可能被顶到视口外面去
+  // （截图时真踩到过：只滚 textarea 没用，被切掉的是它下面那行按钮）
+  const listRect = byId('messages').getBoundingClientRect();
+  const actionsRect = lastNode().querySelector('.msg-edit-actions').getBoundingClientRect();
+  check(
+    '「保存 / 取消」在视口里（没被顶出去）',
+    actionsRect.bottom <= listRect.bottom + 1,
+    `按钮底 ${Math.round(actionsRect.bottom)} / 容器底 ${Math.round(listRect.bottom)}`
+  );
+
+  setValue(lastNode().querySelector('.msg-edit-box'), '不该被保存的内容');
+  click(buttonByText(lastNode(), '取消'));
+  await sleep(200);
+  check('取消后原文没变', lastNode().querySelector('.msg-content').textContent === after);
+
+  // --- 空内容要拦住（想删就用「删除」）---
+  click(buttonByText(lastNode(), '编辑'));
+  await waitFor('出现编辑框', () => !!lastNode().querySelector('.msg-edit-box'));
+  setValue(lastNode().querySelector('.msg-edit-box'), '   ');
+  click(buttonByText(lastNode(), '保存'));
+  await sleep(200);
+  check('空内容不许保存', !!lastNode().querySelector('.msg-edit-box'));
+
+  // --- 真正保存 ---
+  setValue(lastNode().querySelector('.msg-edit-box'), '改过的回复内容：**加粗**');
+  click(buttonByText(lastNode(), '保存'));
+  await waitFor('内容被替换', () => $('#messages').textContent.includes('改过的回复内容'), 5000);
+  await sleep(250);
+
+  check('保存后正文换成新的了', lastNode().querySelector('.msg-content').textContent.includes('改过的回复内容'));
+  check('保存后编辑框收起', !lastNode().querySelector('.msg-edit-box'));
+  check('新内容里的标记照样渲染', !!lastNode().querySelector('strong'), '没渲染出 <strong>');
+
+  // --- 落盘 ---
+  await sleep(450);
+  const convos = (await window.barbara.getConversations()).conversations;
+  const edited = convos.find((c) => (c.messages || []).some((m) => m.content === '改过的回复内容：**加粗**'));
+  check('编辑结果落盘了', !!edited);
+});
+
+// ---------------------------------------------------------------------------
+//  场景 12：对话窗口外观（字号 / 加粗颜色 / 背景图）
 // ---------------------------------------------------------------------------
 await scenario('对话窗口外观', async () => {
   click('#btn-appearance');
@@ -530,7 +610,83 @@ await scenario('对话窗口外观', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 12：世界书 —— 新建条目
+//  场景 12：导出（角色卡 / 世界书 / 会话）
+//
+//  这里只负责「点按钮 + 看渲染层交了什么东西给主进程」；
+//  真正的「写 PNG → 读 PNG」往返由宿主侧用同一份实现跑（见 smoke-test.js）。
+// ---------------------------------------------------------------------------
+await scenario('导出', async () => {
+  // 说明：导出交上去的东西在页面里看不见（发给主进程了），
+  // 所以具体内容由宿主侧断言（见 smoke-test.js 的 probeExports）；
+  // 这里只负责点按钮 + 确认给了反馈。
+
+  // --- 角色卡 ---
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click(buttonByText($$('#char-page-grid .char-card')[0], '编辑'));
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+  click('#btn-export-char');
+  await sleep(300);
+  check('导出角色卡后有提示', $('#toast').textContent.includes('已导出'), $('#toast').textContent);
+  click('#btn-close-chars');
+  await sleep(150);
+
+  // --- 会话 ---
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  click('#btn-export-convo');
+  await sleep(300);
+  check('导出会话后有提示', $('#toast').textContent.includes('已导出'), $('#toast').textContent);
+
+  // --- 空会话不该导出：点「聊天」会新建一个还没说话的空会话 ---
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click(buttonByText($$('#char-page-grid .char-card')[0], '聊天'));
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  await sleep(150);
+  click('#btn-export-convo');
+  await sleep(250);
+  check('空会话不给导出', $('#toast').textContent.includes('还是空的'), $('#toast').textContent);
+});
+
+// ---------------------------------------------------------------------------
+//  场景 15：世界书递归扫描
+//
+//  种子世界里埋了一条链：世界总览(递归) → 十二泰坦 / 火种。
+//  只要会话里出现「翁法罗斯」，总览命中，它的正文再带出另外两条。
+//  真实现跑在 main/worldbook-match.js，假后端直接 require 它。
+// ---------------------------------------------------------------------------
+await scenario('世界书：递归扫描', async () => {
+  // 先让当前会话里出现触发词
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  setValue('#input', '翁法罗斯到底是个什么样的地方？');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 8000);
+  await sleep(250);
+
+  click('#btn-worldbooks');
+  await waitFor('切到世界书页面', () => shown('#view-worldbooks'));
+  click(buttonByText($$('#wb-page-grid .char-card')[0], '编辑'));
+  await waitFor('世界书弹窗打开', () => shown('#worldbooks-modal'));
+  await sleep(150);
+
+  click('#btn-preview-wb');
+  await sleep(400);
+  const toast = $('#toast').textContent;
+
+  check('直接命中的那条在', toast.includes('世界总览'), toast);
+  check('递归把「十二泰坦」带进来了', toast.includes('十二泰坦'), toast);
+  check('递归带进来的条目也能再往下带（火种）', toast.includes('火种'), toast);
+  check('说明了有几条是递归来的', toast.includes('2 条是递归带进来的'), toast);
+  check('没命中的条目不会被塞进来', !toast.includes('无关条目'), toast);
+
+  // 预览失败时不该弹「命中 0 条」之外的东西
+  check('预览给的是命中摘要', toast.includes('命中 3 条'), toast);
+});
+
+// ---------------------------------------------------------------------------
+//  场景 16：世界书 —— 新建条目
 // ---------------------------------------------------------------------------
 await scenario('世界书：新建条目', async () => {
   click('#btn-worldbooks');
@@ -551,6 +707,11 @@ await scenario('世界书：新建条目', async () => {
   const books = await savedWorldbooks();
   const titles = (books[0].entries || []).map((e) => e.title);
   check('条目已落盘', titles.includes('冒烟测试条目'), `落盘的是 ${JSON.stringify(titles)}`);
+
+  // 顺便把这本书导出一次（这时书里已经有条目了，才验得到条目字段的映射）
+  click('#btn-export-wb');
+  await sleep(300);
+  check('导出世界书后有提示', $('#toast').textContent.includes('已导出'), $('#toast').textContent);
 });
 
 // ---------------------------------------------------------------------------

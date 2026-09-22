@@ -122,6 +122,9 @@ const DEFAULT_SETTINGS = {
   sendOnEnter: true,
   showDate: true,
   showUsage: true,
+  // 世界书递归扫描最多连锁几层。0 = 完全关掉递归。
+  // 只有勾了「递归」的条目才会往下带，所以这个上限是第二道闸。
+  worldbookRecursiveDepth: 3,
   // --- 对话窗口外观（只影响显示，不进提示词）---
   chatFontSize: 14,     // 消息正文字号（px）
   chatBoldColor: '',    // **加粗** 用什么颜色，空 = 跟随主题
@@ -357,6 +360,13 @@ function normalizeSettings(saved) {
   // 界面主题
   s.theme = raw.theme === 'dark' ? 'dark' : 'light';
 
+  // 世界书递归深度：0 表示关掉递归（就算条目勾了也不连锁）
+  const depth = Number(raw.worldbookRecursiveDepth);
+  s.worldbookRecursiveDepth =
+    Number.isFinite(depth) && depth >= 0 && depth <= 5
+      ? Math.floor(depth)
+      : DEFAULT_SETTINGS.worldbookRecursiveDepth;
+
   // 对话窗口外观。这三个都只影响显示，所以「值不合法就退回默认」是安全的。
   const fontSize = Number(raw.chatFontSize);
   s.chatFontSize =
@@ -579,60 +589,8 @@ function saveCharacters(payload, options) {
 
 /**
  * 从 PNG 里抠出角色卡数据。
- * PNG 的结构是一串「数据块」：4 字节长度 + 4 字节类型 + 内容 + 4 字节校验。
- * 酒馆把角色卡 JSON 做 base64 后塞在 tEXt 块里，关键字是 chara（v2）或 ccv3（v3）。
+ * 实现搬到了 main/png.js（读和写在一起，测试能做「导出 → 导入」的往返）。
  */
-function parseCharacterCardPng(buffer) {
-  if (!buffer || buffer.length < 8) return null;
-
-  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  for (let i = 0; i < 8; i += 1) {
-    if (buffer[i] !== signature[i]) return null; // 不是 PNG
-  }
-
-  let offset = 8;
-  let charaText = null;
-
-  while (offset + 8 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.toString('latin1', offset + 4, offset + 8);
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + length;
-
-    // 长度字段不可信，越界就停，避免读到别的数据
-    if (length < 0 || dataEnd + 4 > buffer.length) break;
-
-    if (type === 'tEXt') {
-      const chunk = buffer.subarray(dataStart, dataEnd);
-      const separator = chunk.indexOf(0);
-      if (separator > 0) {
-        const keyword = chunk.toString('latin1', 0, separator);
-        // ccv3 是 v3 卡，优先于老的 chara
-        if (keyword === 'chara' && !charaText) {
-          charaText = chunk.toString('latin1', separator + 1);
-        } else if (keyword === 'ccv3') {
-          charaText = chunk.toString('latin1', separator + 1);
-        }
-      }
-    }
-
-    if (type === 'IEND') break;
-    offset = dataEnd + 4;
-  }
-
-  if (!charaText) return null;
-
-  // 正常是 base64；有些工具直接塞了明文 JSON，两种都试
-  try {
-    return JSON.parse(Buffer.from(charaText, 'base64').toString('utf8'));
-  } catch (err) {
-    try {
-      return JSON.parse(charaText);
-    } catch (err2) {
-      return null;
-    }
-  }
-}
 
 /**
  * 把角色卡里的头像字段转成可用的 dataURL。
@@ -663,6 +621,12 @@ function characterFromCard(card, avatar, source, fallbackName) {
   const recognizable = d.name || d.char_name || d.description || d.first_mes || d.personality;
   if (!recognizable) return null;
 
+  // 自己导出的卡会把年龄/性别/种族/属性放在 extensions.barbara
+  const ext =
+    d.extensions && typeof d.extensions === 'object' && d.extensions.barbara && typeof d.extensions.barbara === 'object'
+      ? d.extensions.barbara
+      : {};
+
   const character = normalizeCharacter(
     {
       name: d.name || d.char_name || fallbackName,
@@ -676,7 +640,13 @@ function characterFromCard(card, avatar, source, fallbackName) {
       systemPrompt: d.system_prompt,
       postHistoryInstructions: d.post_history_instructions,
       creatorNotes: d.creator_notes || d.creatorcomment,
-      tags: d.tags
+      tags: d.tags,
+      // 自己导出去的卡会把年龄/性别/种族/属性放在 extensions.barbara，
+      // 这里读回来，导出再导入才是一个闭环（别的软件按规范会原样忽略这段）
+      age: ext.age,
+      gender: ext.gender,
+      race: ext.race,
+      attributes: ext.attributes
     },
     source
   );
@@ -769,6 +739,9 @@ function normalizeWorldbookEntry(raw) {
     order,
     // 蓝圈：无条件注入，不需要关键词
     constant: r.constant === true || r.strategy === 'constant',
+    // 递归：这条命中后，它的正文也参与下一轮扫描，能再带出别的条目。
+    // 默认关 —— 递归会明显增加 token，得一条条显式打开。
+    recursive: r.recursive === true,
     // 酒馆默认开启「全词匹配」，但官方文档明确说这对中日文有害（不用空格分词），
     // 所以这里默认关闭，只有显式打开才启用。
     matchWholeWords: bool(r.matchWholeWords ?? r.match_whole_words, false),
@@ -777,6 +750,14 @@ function normalizeWorldbookEntry(raw) {
     enabled
   };
 }
+
+// ---------------------------------------------------------------------------
+//  导出：写文件
+//  角色卡要能导出成「酒馆 PNG 卡」—— 卡数据 base64 后塞进 PNG 的 tEXt 块。
+//  读和写都在 main/png.js 里（独立成模块，测试能 require 同一份代码做往返）。
+// ---------------------------------------------------------------------------
+
+const { pngWithTextChunk, parseCharacterCardPng } = require('./main/png.js');
 
 /** 世界书的条目列表：可能是数组，也可能是酒馆导出时那种以索引为键的对象 */
 function worldbookEntryList(raw) {
@@ -884,129 +865,11 @@ function looksLikeLorebook(card) {
 }
 
 // --- 匹配引擎 -------------------------------------------------------------
+// 关键词命中判定、递归扫描这些纯逻辑都在 main/worldbook-match.js 里。
+// 搬出去是为了让 tools/smoke-test.js 能 require 同一份代码来测 ——
+// 否则测的是测试里另写的一套，真逻辑坏了也发现不了。
 
-/**
- * 关键词是否命中。
- * 中日韩文字没有空格分词，只能做子串匹配（酒馆自己也建议这时关掉全词匹配）；
- * 纯拉丁字母的关键词才用词边界，避免 king 命中 liking。
- */
-const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
-
-function escapeRegExp(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * 编译过的关键词正则缓存。
- * 匹配是每轮对每个条目每个关键词都跑的，不缓存的话每句话都要重新编译几百次正则。
- * 用户改关键词时字符串会变，键自然失配，所以不用担心缓存过期。
- */
-const keywordRegexCache = new Map();
-const MAX_KEYWORD_REGEX_CACHE = 4000;
-
-/** 解析 /re/flags 写法；不是正则就返回 null */
-function parseRegexKeyword(keyword) {
-  if (keyword.length <= 2 || !keyword.startsWith('/')) return null;
-
-  const cached = keywordRegexCache.get(keyword);
-  if (cached !== undefined) return cached;
-
-  let compiled = null;
-  const lastSlash = keyword.lastIndexOf('/');
-  if (lastSlash > 0) {
-    const body = keyword.slice(1, lastSlash);
-    const flags = keyword.slice(lastSlash + 1);
-    if (/^[gimsuy]*$/.test(flags)) {
-      try {
-        compiled = new RegExp(body, flags);
-      } catch (err) {
-        // 正则写错了就当普通文本处理，别让一条坏正则废掉整本书
-        compiled = null;
-      }
-    }
-  }
-
-  // 上限只是防止畸形文件把缓存撑爆；简单粗暴地整体清空即可
-  if (keywordRegexCache.size >= MAX_KEYWORD_REGEX_CACHE) keywordRegexCache.clear();
-  keywordRegexCache.set(keyword, compiled);
-  return compiled;
-}
-
-/** 全词匹配的正则同样值得缓存（中文默认不走这条，主要是英文世界书） */
-const wordBoundaryCache = new Map();
-
-function wordBoundaryRegex(keyword) {
-  const cached = wordBoundaryCache.get(keyword);
-  if (cached !== undefined) return cached;
-
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(keyword)}(?![\\p{L}\\p{N}])`, 'u');
-  if (wordBoundaryCache.size >= MAX_KEYWORD_REGEX_CACHE) wordBoundaryCache.clear();
-  wordBoundaryCache.set(keyword, re);
-  return re;
-}
-
-function keywordHit(haystack, rawKeyword, entry) {
-  const keyword = String(rawKeyword || '').trim();
-  if (!keyword) return false;
-
-  // 关键词写成 /re/flags 就当正则处理，和酒馆一致
-  const asRegex = parseRegexKeyword(keyword);
-  if (asRegex) return asRegex.test(haystack);
-
-  const text = entry && entry.caseSensitive ? haystack : haystack.toLowerCase();
-  const needle = entry && entry.caseSensitive ? keyword : keyword.toLowerCase();
-
-  if (CJK_RE.test(needle)) return text.includes(needle);
-  if (entry && entry.matchWholeWords) return wordBoundaryRegex(needle).test(text);
-  return text.includes(needle);
-}
-
-/** 把某条目的所有关键词拼成一个正则，用来判断「至少命中一个」还是「全部命中」 */
-function anyKeywordHit(haystack, keywords, entry) {
-  return keywords.some((k) => keywordHit(haystack, k, entry));
-}
-
-function allKeywordsHit(haystack, keywords, entry) {
-  return keywords.length > 0 && keywords.every((k) => keywordHit(haystack, k, entry));
-}
-
-/** 单条 entry 是否应该被注入 */
-function entryMatches(entry, haystack) {
-  if (!entry || entry.enabled === false) return false;
-  if (!String(entry.content || '').trim()) return false;
-
-  // constant（蓝圈）不需要关键词，永远注入
-  if (entry.constant) return true;
-  if (!entry.keys.length) return false;
-
-  // 触发概率：100 必中，50 一半概率，0 等于停用
-  if (entry.probability < 100 && Math.random() * 100 >= entry.probability) return false;
-
-  if (!anyKeywordHit(haystack, entry.keys, entry)) return false;
-
-  // 附加过滤词（secondary keys）
-  if (entry.secondaryKeys.length) {
-    const any = anyKeywordHit(haystack, entry.secondaryKeys, entry);
-    const all = allKeywordsHit(haystack, entry.secondaryKeys, entry);
-    switch (entry.selectiveLogic) {
-      case 'AND_ALL':
-        if (!all) return false;
-        break;
-      case 'NOT_ANY':
-        if (any) return false;
-        break;
-      case 'NOT_ALL':
-        if (all) return false;
-        break;
-      case 'AND_ANY':
-      default:
-        if (!any) return false;
-        break;
-    }
-  }
-
-  return true;
-}
+const { entryMatches, matchWorldbookEntries, formatWorldbookSection } = require('./main/worldbook-match.js');
 
 /** 一组世界书 id 对应的全部条目（去重，同一个 id 只取一次） */
 function worldbookEntriesByIds(ids) {
@@ -1025,29 +888,6 @@ function worldbookEntriesByIds(ids) {
     }
   }
   return entries;
-}
-
-/**
- * 扫描近期对话，返回命中的世界书条目（按 order 升序，大的更靠后 = 影响更大）。
- * scanDepth 是往回扫多少条消息，和酒馆的 Scan Depth 一个意思。
- */
-function matchWorldbookEntries(entries, scanText) {
-  const hits = [];
-  for (const entry of entries) {
-    if (entryMatches(entry, scanText)) hits.push(entry);
-  }
-  hits.sort((a, b) => {
-    if (a.order !== b.order) return a.order - b.order;
-    return String(a.title).localeCompare(String(b.title));
-  });
-  return hits;
-}
-
-/** 命中条目拼成注入块 */
-function formatWorldbookSection(hits) {
-  if (!hits.length) return '';
-  const lines = hits.map((e) => `【${e.title}】\n${String(e.content).trim()}`);
-  return `[世界设定]\n以下资料与当前对话相关，请自然地运用，不要直接复述：\n\n${lines.join('\n\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,16 +1386,22 @@ function registerIpc() {
     const convoIds = Array.isArray(request.worldbookIds) ? request.worldbookIds : [];
     const entries = worldbookEntriesByIds(convoIds);
 
-    const hits = matchWorldbookEntries(entries, scanText);
+    const result = matchWorldbookEntries(entries, scanText, {
+      recursiveDepth: request.recursiveDepth
+    });
+    const hits = result.hits;
 
     return {
       total: entries.length,
       scanDepth,
+      rounds: result.rounds,
+      recursiveCount: result.recursiveCount,
       hits: hits.map((e) => ({
         id: e.id,
         title: e.title,
         worldbookName: e.worldbookName,
         order: e.order,
+        recursive: e.recursive === true,
         length: String(e.content).length
       })),
       section: formatWorldbookSection(hits)
@@ -1764,6 +1610,40 @@ function registerIpc() {
   ipcMain.handle('util:copy', (_event, text) => {
     clipboard.writeText(String(text || ''));
     return true;
+  });
+
+  /**
+   * 导出文件。渲染层把两种形态都准备好，**由用户选的后缀决定写哪一种**：
+   *   · text              文本（.json / .md 用，按 utf8 写）
+   *   · base64 + pngText  二进制（.png 用；pngText 会先作为 tEXt 块插进去）
+   * 这样「导出角色卡」只需要一个按钮。
+   */
+  ipcMain.handle('util:saveFile', async (_event, payload) => {
+    const request = payload || {};
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: request.title || '保存',
+      defaultPath: request.fileName || 'export',
+      filters: Array.isArray(request.filters) ? request.filters : []
+    });
+
+    if (result.canceled || !result.filePath) return { canceled: true };
+
+    const ext = path.extname(result.filePath).toLowerCase();
+    try {
+      if (ext === '.png' && request.base64) {
+        let buffer = Buffer.from(String(request.base64), 'base64');
+        if (request.pngText && request.pngText.keyword) {
+          buffer = pngWithTextChunk(buffer, request.pngText.keyword, request.pngText.text || '');
+        }
+        fs.writeFileSync(result.filePath, buffer);
+      } else {
+        fs.writeFileSync(result.filePath, String(request.text == null ? '' : request.text), 'utf8');
+      }
+    } catch (err) {
+      return { canceled: false, error: (err && err.message) || '写文件失败' };
+    }
+
+    return { canceled: false, filePath: result.filePath };
   });
 
   ipcMain.handle('util:openPath', async (_event, which) => {

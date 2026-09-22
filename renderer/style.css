@@ -557,6 +557,29 @@ body {
   border-radius: 3px;
 }
 
+/* 就地编辑消息：气泡里换成 textarea + 保存/取消 */
+.msg-edit-box {
+  width: 100%;
+  min-height: 90px;
+  max-height: 50vh;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.msg-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* 心理描写：弱化的旁白块，和正文一眼区分开。
    用带透明度的颜色，浅色/夜间两套主题都不用各写一遍。 */
 .bubble .msg-inner {

@@ -25,6 +25,10 @@ const path = require('path');
 // 角色「属性」丢过一次，就是因为假后端只做存取、不做归一化 ——
 // 主进程白名单漏了字段，测试却全绿。现在这段往返走的是同一份代码。
 const { normalizeCharacter } = require('../main/characters.js');
+// 导出 PNG 卡要插 tEXt 块、导入要读回来 —— 用同一份实现，才能测真正的往返
+const { pngWithTextChunk, parseCharacterCardPng } = require('../main/png.js');
+// 世界书匹配（含递归扫描）也用真实现
+const { matchWorldbookEntries, formatWorldbookSection } = require('../main/worldbook-match.js');
 
 const APP_DIR = path.join(__dirname, '..');
 const OVERALL_TIMEOUT_MS = 90000;
@@ -64,7 +68,73 @@ function makeStore() {
       showUsage: false
     },
     characters: [],
-    worldbooks: [{ id: 'w-test', name: '冒烟测试世界', entries: [], characters: [], opening: '' }],
+    worldbooks: [
+      {
+        id: 'w-test',
+        name: '冒烟测试世界',
+        characters: [],
+        opening: '',
+        // 前三条是给「递归扫描」用的连锁：只提「翁法罗斯」，
+        // 靠总览正文里的「十二泰坦」「火种」把另外两条带出来。
+        // 第四条谁都不提它，用来验「没命中就是没命中」。
+        entries: [
+          {
+            id: 'e-root',
+            title: '世界总览',
+            keys: ['翁法罗斯'],
+            secondaryKeys: [],
+            selectivelogic: 'AND_ANY',
+            selectiveLogic: 'AND_ANY',
+            // 正文只提「十二泰坦」，不提「火种」—— 这样才是一条严格的链
+            content: '翁法罗斯有十二泰坦。',
+            constant: false,
+            recursive: true,
+            probability: 100,
+            order: 100,
+            enabled: true
+          },
+          {
+            id: 'e-titan',
+            title: '十二泰坦',
+            keys: ['十二泰坦'],
+            secondaryKeys: [],
+            selectiveLogic: 'AND_ANY',
+            content: '十二泰坦守着火种，是这个世界的神。',
+            constant: false,
+            recursive: true,
+            probability: 100,
+            order: 100,
+            enabled: true
+          },
+          {
+            id: 'e-flame',
+            title: '火种',
+            keys: ['火种'],
+            secondaryKeys: [],
+            selectiveLogic: 'AND_ANY',
+            content: '火种是泰坦留下的力量。',
+            constant: false,
+            recursive: false,
+            probability: 100,
+            order: 100,
+            enabled: true
+          },
+          {
+            id: 'e-unrelated',
+            title: '无关条目',
+            keys: ['完全没人提的词'],
+            secondaryKeys: [],
+            selectiveLogic: 'AND_ANY',
+            content: '这条不该被带进来。',
+            constant: false,
+            recursive: true,
+            probability: 100,
+            order: 100,
+            enabled: true
+          }
+        ]
+      }
+    ],
     conversations: [],
     activeId: null
   };
@@ -73,6 +143,8 @@ function makeStore() {
 const store = makeStore();
 const calls = []; // 记录渲染层请求过的写操作，方便排查
 let chatPayloads = []; // 每次发给模型的完整消息（按顺序留着，供宿主侧断言用）
+let lastExport = null; // 最后一次「导出」交给主进程的东西
+const exportedPayloads = []; // 按顺序留所有导出，宿主侧断言用
 
 function remember(channel, payload) {
   calls.push(channel);
@@ -140,7 +212,50 @@ function registerStubs() {
     remember('worldbooks:save-sync', payload);
     if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
   });
-  ipcMain.handle('worldbooks:preview', () => ({ section: '' }));
+  // 世界书匹配用**真实现**（main/worldbook-match.js），这样递归扫描、
+  // 副关键词、概率这些逻辑测的是真代码。这里只补主进程 handler 里那段
+  // 「取最近 N 条拼成扫描文本」——它本来就是十来行拼字符串。
+  ipcMain.handle('worldbooks:preview', (_event, payload) => {
+    const request = payload || {};
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+
+    let scanDepth = Number(request.scanDepth);
+    if (!isFinite(scanDepth) || scanDepth <= 0) scanDepth = 6;
+    scanDepth = Math.min(50, Math.floor(scanDepth));
+
+    const usable = messages.filter((m) => m && typeof m.content === 'string' && String(m.content).trim());
+    const scanText = usable
+      .slice(-scanDepth)
+      .map((m) => String(m.content))
+      .join('\n');
+
+    const wanted = Array.isArray(request.worldbookIds) ? request.worldbookIds : [];
+    const entries = [];
+    for (const book of store.worldbooks) {
+      if (!wanted.includes(book.id)) continue;
+      for (const entry of book.entries || []) {
+        entries.push({ ...entry, worldbookId: book.id, worldbookName: book.name });
+      }
+    }
+
+    const matched = matchWorldbookEntries(entries, scanText, { recursiveDepth: request.recursiveDepth });
+
+    return {
+      total: entries.length,
+      scanDepth,
+      rounds: matched.rounds,
+      recursiveCount: matched.recursiveCount,
+      hits: matched.hits.map((e) => ({
+        id: e.id,
+        title: e.title,
+        worldbookName: e.worldbookName,
+        order: e.order,
+        recursive: e.recursive === true,
+        length: String(e.content).length
+      })),
+      section: formatWorldbookSection(matched.hits)
+    };
+  });
 
   // --- 图片 / 杂项 ---
   // 返回一张真的 1×1 PNG：这样「选背景图」那条链路（解码 → 缩放 → 存 dataURL）
@@ -151,6 +266,15 @@ function registerStubs() {
   ipcMain.handle('util:copy', () => true);
   ipcMain.handle('util:openPath', () => true);
 
+  // 「导出」：不弹真的保存框，但把渲染层交上来的东西原样收下 ——
+  // 宿主侧再拿它跑一遍真正的「写 PNG → 读 PNG」往返
+  ipcMain.handle('util:saveFile', (_event, payload) => {
+    remember('util:saveFile');
+    lastExport = clone(payload);
+    exportedPayloads.push(clone(payload));
+    return { canceled: false, filePath: 'C:\\fake\\' + ((payload && payload.fileName) || 'export') };
+  });
+
   // --- 聊天：假装模型回了一句话，并且真的走一遍流式通道 ---
   ipcMain.handle('chat:stop', () => true);
   ipcMain.handle('chat:send', async (event, payload) => {
@@ -159,19 +283,21 @@ function registerStubs() {
     const requestId = (payload && payload.requestId) || 'req-smoke';
     const model = (payload && payload.model) || 'test-model';
 
-    // 把「打字机」那条链路也带上：分两次推增量
-    for (const piece of ['冒烟测试', '回复']) {
+    // 分片拼起来必须等于下面返回的 content —— 真实流式接口就是这样。
+    // （之前分片只是返回值的前缀，那会让「继续」这种依赖分片的路径验不准。）
+    const CONTENT = '冒烟测试回复：我收到了。**这是加粗**，==这是高亮==。';
+    const pieces = ['冒烟测试', '回复：我收到了。', '**这是加粗**，', '==这是高亮==。'];
+
+    for (const piece of pieces) {
       if (!event.sender.isDestroyed()) event.sender.send('chat:chunk', { requestId, text: piece });
-      await sleep(10);
+      await sleep(8);
     }
 
     return {
       ok: true,
       requestId,
       model,
-      // 故意带上两种重点标记：渲染层要把它们变成 <strong> / .msg-em，
-      // 而不是把 ** == 原样显示出来
-      content: '冒烟测试回复：我收到了。**这是加粗**，==这是高亮==。',
+      content: CONTENT,
       reasoning: '',
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
     };
@@ -349,6 +475,171 @@ function probeInjection(result) {
   });
 }
 
+/**
+ * 导出验证。放在宿主侧的原因：渲染层把内容交给主进程之后自己就看不见了。
+ *
+ * 最有价值的一条是**真往返**：拿渲染层生成的 PNG 字节，用主进程真正在用的
+ * pngWithTextChunk 把卡数据插进去，再用 parseCharacterCardPng 读回来 ——
+ * 这两步都是真代码（main/png.js），所以「导出的卡能不能被导入」是真验过的。
+ */
+function probeExports(result) {
+  // 按内容找，不按下标 —— 以后调整场景顺序时不会连带把断言搞错
+  const charExport = exportedPayloads.find((p) => p.text && p.text.includes('chara_card_v2'));
+  const wbExport = exportedPayloads.find((p) => p.text && p.text.includes('"entries"'));
+  const convoExport = exportedPayloads.find((p) => String(p.fileName || '').endsWith('.md'));
+
+  // --- 角色卡 ---
+  let cardOk = false;
+  let cardDetail = '没有导出记录';
+  if (charExport) {
+    try {
+      const png = Buffer.from(String(charExport.base64 || ''), 'base64');
+      const withText = pngWithTextChunk(png, charExport.pngText.keyword, charExport.pngText.text);
+      const card = parseCharacterCardPng(withText);
+      const ext = (card && card.data && card.data.extensions && card.data.extensions.barbara) || {};
+      cardOk =
+        !!card &&
+        card.spec === 'chara_card_v2' &&
+        card.data.name === '属性测试角色' &&
+        ext.age === '18' &&
+        ext.gender === '女' &&
+        Array.isArray(ext.attributes) &&
+        ext.attributes.length === 2;
+      cardDetail = card ? `读回来的是「${card.data.name}」 ext=${JSON.stringify(ext)}` : 'PNG 里没读回卡数据';
+    } catch (err) {
+      cardDetail = '往返崩了：' + ((err && err.message) || err);
+    }
+  }
+  result.results.push({
+    name: '导出：角色卡 PNG 写进去还能读回来（真往返）',
+    pass: cardOk,
+    detail: cardOk ? '' : cardDetail
+  });
+  result.results.push({
+    name: '导出：角色卡文件名默认 .png',
+    pass: !!charExport && String(charExport.fileName).endsWith('.png'),
+    detail: String(charExport && charExport.fileName)
+  });
+
+  // --- 世界书 ---
+  let bookOk = false;
+  let bookDetail = '没有导出记录';
+  if (wbExport) {
+    try {
+      const book = JSON.parse(wbExport.text);
+      const first = Object.values(book.entries || {})[0];
+      bookOk =
+        !!book.name &&
+        !!first &&
+        'key' in first &&
+        'keysecondary' in first &&
+        'disable' in first &&
+        String(wbExport.fileName).endsWith('.json');
+      bookDetail = `name=${book.name} 首个条目字段=${first ? Object.keys(first).join(',') : '无'}`;
+    } catch (err) {
+      bookDetail = 'JSON 解析失败：' + ((err && err.message) || err);
+    }
+  }
+  result.results.push({
+    name: '导出：世界书是酒馆认的 lorebook 形状',
+    pass: bookOk,
+    detail: bookOk ? '' : bookDetail
+  });
+
+  // --- 会话 ---
+  const md = String((convoExport && convoExport.text) || '');
+  const convoOk =
+    !!convoExport &&
+    String(convoExport.fileName).endsWith('.md') &&
+    md.startsWith('# ') &&
+    md.includes('改过的回复内容') &&
+    md.includes('## 对话');
+  result.results.push({
+    name: '导出：会话是能读的 Markdown',
+    pass: convoOk,
+    detail: convoOk ? '' : md.slice(0, 80)
+  });
+}
+
+/**
+ * 递归扫描的引擎级验证。直接打 main/worldbook-match.js —— 比隔着界面点
+ * 「预览命中」更精确，能把深度 0/1/3 和「哪条允许往下带」分开验。
+ */
+function probeRecursion(result) {
+  const entry = (id, title, keys, content, recursive) => ({
+    id,
+    title,
+    keys,
+    secondaryKeys: [],
+    selectiveLogic: 'AND_ANY',
+    content,
+    constant: false,
+    recursive,
+    probability: 100,
+    order: 100,
+    enabled: true
+  });
+
+  // 严格链：总览 → 十二泰坦 → 火种。每一条的正文只提下一层的关键词，
+  // 所以深度几层就该带出几条 —— 如果总览正文里同时写了「火种」，
+  // 那就成了扇出（深度 1 就全出来），验不出「逐层接力」。
+  const entries = [
+    entry('a', '世界总览', ['翁法罗斯'], '翁法罗斯有十二泰坦。', true),
+    entry('b', '十二泰坦', ['十二泰坦'], '十二泰坦守着火种。', true),
+    entry('c', '火种', ['火种'], '火种是泰坦留下的力量。', false),
+    entry('d', '无关条目', ['没人提的词'], '不该出现。', true)
+  ];
+
+  const run = (depth) => matchWorldbookEntries(entries, '翁法罗斯是个什么样的地方？', { recursiveDepth: depth });
+
+  const zero = run(0);
+  const one = run(1);
+  const three = run(3);
+
+  const titles = (r) => r.hits.map((h) => h.title).join('、');
+  const ok =
+    zero.hits.length === 1 &&
+    zero.recursiveCount === 0 &&
+    one.hits.length === 2 &&
+    one.recursiveCount === 1 &&
+    three.hits.length === 3 &&
+    three.recursiveCount === 2 &&
+    !titles(three).includes('无关条目') &&
+    three.rounds === 3;
+  result.results.push({
+    name: '递归扫描：深度 0 只给直接命中的那一条',
+    pass: zero.hits.length === 1 && zero.recursiveCount === 0,
+    detail: `${titles(zero)}（${zero.hits.length} 条）`
+  });
+  result.results.push({
+    name: '递归扫描：深度 1 带出第一层',
+    pass: one.hits.length === 2 && one.recursiveCount === 1,
+    detail: `${titles(one)}（${one.hits.length} 条）`
+  });
+  result.results.push({
+    name: '递归扫描：逐层接力直到没得带（深度 3 → 3 条 3 轮）',
+    pass: ok,
+    detail: `${titles(three)}（${three.hits.length} 条 / ${three.rounds} 轮 / 递归 ${three.recursiveCount}）`
+  });
+  result.results.push({
+    name: '递归扫描：命中过的条目不会被重复带进来',
+    pass: new Set(three.hits.map((h) => h.id)).size === three.hits.length,
+    detail: titles(three)
+  });
+
+  // 递归关闭的条目：它的正文不该参与下一轮
+  const gated = matchWorldbookEntries(
+    [entry('a', '总览', ['翁法罗斯'], '里面写了十二泰坦。', false), entry('b', '十二泰坦', ['十二泰坦'], '细节。', false)],
+    '翁法罗斯',
+    { recursiveDepth: 3 }
+  );
+  result.results.push({
+    name: '递归扫描：没勾「递归」的条目不会往下带',
+    pass: gated.hits.length === 1,
+    detail: titles(gated)
+  });
+}
+
 app.whenReady().then(async () => {
   registerStubs();
 
@@ -398,6 +689,8 @@ app.whenReady().then(async () => {
   if (!crashed && result) {
     try {
       probeInjection(result);
+      probeExports(result);
+      probeRecursion(result);
       await probeHover(win, result);
     } catch (err) {
       crashed = '宿主侧验证失败：' + ((err && err.message) || err);
