@@ -179,12 +179,12 @@ function looksLikeLorebook(card) {
   return !card.first_mes && !card.char_name && !card.personality && !card.mes_example;
 }
 
+// 只导出外部真正要用的。normalizeWorldbookEntry / worldbookEntryList 是
+// 这个文件的内部步骤，导出去只会让人以为别处可以直接调它们。
 module.exports = {
   MAX_WORLDBOOK_ENTRIES,
   MAX_WORLDBOOK_CHARACTERS,
   MAX_WORLDBOOK_OPENING,
-  normalizeWorldbookEntry,
-  worldbookEntryList,
   normalizeWorldbook,
   worldbookFromCharacterBook,
   worldbookFromLorebook,

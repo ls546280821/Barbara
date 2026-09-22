@@ -646,8 +646,7 @@ function newWorldbookId() {
 // 搬出去是为了让 tools/smoke-test.js 能 require 同一份代码来测 ——
 // 否则测的是测试里另写的一套，真逻辑坏了也发现不了。
 
-const { entryMatches, matchWorldbookEntries, formatWorldbookSection } = require('./main/worldbook-match.js');
-const { normalizeWorldbook } = require('./main/worldbook-parse.js');
+const { matchWorldbookEntries, formatWorldbookSection } = require('./main/worldbook-match.js');
 const { createWorldbookNormalizer } = require('./main/worldbook-store.js');
 const { parseImportFile } = require('./main/card-import.js');
 const { importFiles } = require('./main/import-files.js');
@@ -655,9 +654,9 @@ const { importFiles } = require('./main/import-files.js');
 // --- 导出：写文件 -----------------------------------------------------------
 // 角色卡要能导出成「酒馆 PNG 卡」—— 卡数据 base64 后塞进 PNG 的 tEXt 块。
 // 读和写都在 main/png.js 里（独立成模块，测试能 require 同一份代码做往返）。
-const { pngWithTextChunk, parseCharacterCardPng } = require('./main/png.js');
+const { pngWithTextChunk } = require('./main/png.js');
 // 记忆检索的向量与排序，纯函数，同样为了可测而独立成模块。
-const { hashText, encodeVector, decodeVector, rankBySimilarity, collectCandidates } = require('./main/vectors.js');
+const { encodeVector, decodeVector, rankBySimilarity, collectCandidates } = require('./main/vectors.js');
 
 /**
  * 落盘时走一遍归一化。

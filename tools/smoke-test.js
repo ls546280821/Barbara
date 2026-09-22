@@ -1823,6 +1823,59 @@ app.whenReady().then(async () => {
     }
   }
 
+  // --shot=<场景>：把窗口显示出来、切到指定界面再截图到 tools/shots/。
+  // 结构和逻辑测试盖不住的「看着对不对」（间距、对齐、配色）得靠这个看，
+  // 不用每次都临时加代码再删。
+  // 用法：electron tools/smoke-test.js --no-sandbox --shot=settings
+  const shotArg = (process.argv.find((a) => a.startsWith('--shot')) || '').split('=')[1];
+  if (shotArg) {
+    try {
+      win.show();
+      // 每个场景 = 打开哪个界面。只点真实按钮，不调内部函数。
+      const DRIVERS = {
+        settings: `
+          document.querySelector('#btn-settings')?.click();
+          await new Promise(r => setTimeout(r, 700));`,
+        panel: `
+          const $$ = (s) => Array.from(document.querySelectorAll(s));
+          const $ = (s) => document.querySelector(s);
+          for (const it of $$('#convo-list .convo-item')) {
+            it.click();
+            await new Promise(r => setTimeout(r, 500));
+            if ($$('#panel-fields .panel-row').length) break;
+          }
+          const box = $('#panel-box');
+          if (box && box.classList.contains('collapsed')) { $('#btn-panel-collapse')?.click(); await new Promise(r => setTimeout(r, 300)); }
+          const t = $('#toast'); if (t) { t.classList.add('hidden'); t.textContent = ''; }`,
+        chars: `
+          document.querySelector('#btn-chars')?.click();
+          await new Promise(r => setTimeout(r, 500));`,
+        charEditor: `
+          const $$ = (s) => Array.from(document.querySelectorAll(s));
+          document.querySelector('#btn-chars')?.click();
+          await new Promise(r => setTimeout(r, 400));
+          const card = $$('#char-page-grid .char-card')[0];
+          const btn = card && Array.from(card.querySelectorAll('button')).find(b => b.textContent.trim() === '编辑');
+          if (btn) btn.click();
+          await new Promise(r => setTimeout(r, 600));
+          const t = document.querySelector('#toast'); if (t) { t.classList.add('hidden'); t.textContent = ''; }`
+      };
+      const driver = DRIVERS[shotArg];
+      if (!driver) {
+        console.log(`  未知截图场景「${shotArg}」，可用：${Object.keys(DRIVERS).join(' / ')}`);
+      } else {
+        await win.webContents.executeJavaScript(`(async () => { ${driver}\n return true; })()`);
+        await new Promise((r) => setTimeout(r, 700));
+        const dir = path.join(__dirname, 'shots');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, `${shotArg}.png`), (await win.webContents.capturePage()).toPNG());
+        console.log(`  截图: tools/shots/${shotArg}.png`);
+      }
+    } catch (err) {
+      console.log('  截图失败:', (err && err.message) || err);
+    }
+  }
+
   const ok = report(result, consoleErrors, consoleWarnings, crashed);
   app.exit(ok ? 0 : 1);
 });

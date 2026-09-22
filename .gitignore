@@ -23,3 +23,6 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# 冒烟测试的截图产物（--shot=<场景> 生成，用来肉眼核对界面）
+tools/shots/
