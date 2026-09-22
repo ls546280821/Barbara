@@ -64,6 +64,7 @@ export const el = {
   btnClosePerspective: $('btn-close-perspective'),
   btnClosePerspective2: $('btn-close-perspective-2'),
   pNarration: $('p-narration'),
+  pPace: $('p-pace'),
   pGm: $('p-gm'),
   // 记忆
   btnMemory: $('btn-memory'),

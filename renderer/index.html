@@ -818,6 +818,19 @@
           </span>
         </label>
 
+        <label class="field field-stack">
+          <span class="field-label">推进节奏</span>
+          <select id="p-pace" aria-label="推进节奏">
+            <option value="step">一步一步 —— 走到需要你做决定的地方就停下</option>
+            <option value="brisk">快节奏 —— 允许一轮里多推进一些</option>
+          </select>
+          <span class="field-help">
+            「一步一步」会明确要求 AI <b>不替你决定、不替你说、不把一整段过程演完</b>。<br />
+            世界模型建议保持这个模式 —— 否则你说一句「去酒馆玩游戏」，
+            AI 可能把游戏赢完、NPC 的反应也全写完，你只剩看的份。
+          </span>
+        </label>
+
         <label class="check">
           <input id="p-gm" type="checkbox" />
           <span class="check-text">
@@ -830,7 +843,7 @@
         </label>
 
         <p class="field-help perspective-note">
-          两种设置都会写进发给模型的消息里，<strong>不影响已经生成的回答</strong>；改完从下一条回复开始生效。
+          这些设置都会写进发给模型的消息里，<strong>不影响已经生成的回答</strong>；改完从下一条回复开始生效。
         </p>
       </div>
 

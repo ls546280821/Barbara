@@ -428,11 +428,13 @@ function renderHeader() {
     el.convoMeta.textContent += ` · 世界：${convoBooks.map((b) => b.name).join('、')}`;
   }
 
-  // 视角：只在偏离默认（标准 + 非 GM）时提示，平时不占位置
+  // 视角：只在偏离默认（标准 + 一步一步 + 非 GM）时提示，平时不占位置
   const viewTags = [];
   if (isGmMode(convo)) viewTags.push('GM 模式');
   const narrationMode = convoNarrationMode(convo);
   if (narrationMode !== DEFAULT_NARRATION_MODE) viewTags.push(NARRATION_MODES[narrationMode].label);
+  const paceMode = convoPaceMode(convo);
+  if (paceMode !== DEFAULT_PACE_MODE) viewTags.push(PACE_MODES[paceMode].label);
   if (viewTags.length) el.convoMeta.textContent += ` · ${viewTags.join(' + ')}`;
 
   // 记忆：正在压缩时给个提示，压缩完显示覆盖了多少条
@@ -880,8 +882,10 @@ function createConvo(activate) {
     // 世界模型开局通常是空的，第一条带面板的回复会自动填上。
     panel: {},
     panelFields: [],
-    // 视角设置：叙述模式（标准/内心描写/上帝视角）和 GM 模式
+    // 视角设置：叙述模式（标准/内心描写/上帝视角）、推进节奏、GM 模式
     narrationMode: DEFAULT_NARRATION_MODE,
+    // 默认「一步一步」：不这样的话模型会一口气把整场戏演完，玩家只剩看的份
+    paceMode: DEFAULT_PACE_MODE,
     gmMode: false,
     // 分段记忆摘要：每段 { id, title, text, start, end, at }
     summaries: []
@@ -1264,14 +1268,63 @@ function emphasisRuleText() {
   );
 }
 
-function roleplayRuleText(charName, me) {
+function roleplayRuleText(charName, me, convo) {
   return (
     `【扮演规则】\n` +
     `你现在要扮演「${charName}」。请始终以第一人称，用 ${charName} 的语气、性格和说话习惯回应，` +
     `保持人设前后一致，不要跳出角色，也不要提到自己是 AI、语言模型或助手。` +
     `把对方称作「${me}」。用动作或神态描写时放在括号里。\n` +
+    // 单角色扮演同样要约束节奏：不然你说一句「我们去玩游戏」，
+    // 角色会把整场游戏连同胜负一起演完，你只剩看的份
+    `${paceRuleText(convo)}` +
     emphasisRuleText()
   );
+}
+
+/**
+ * 推进节奏。
+ *
+ * 这是世界模型最容易出问题的地方：提示词里只要说「推进情节」，
+ * 模型就会一口气把整场戏演完 —— 你刚说完「去酒馆玩游戏」，
+ * 它已经把酒喝完、游戏赢完、NPC 的反应也全写完了，
+ * 甚至替你决定了玩法细节。玩家只剩下看的份。
+ *
+ * 所以节奏必须显式约束，而且要把「不要替玩家决定」讲清楚。
+ */
+const PACE_MODES = {
+  step: {
+    label: '一步一步',
+    hint: '走到需要你做决定的地方就停下',
+    text:
+      '【推进节奏】\n' +
+      '一次回复只推进一小步。注意区分：NPC 自己的言行由你决定，但玩家做什么、说什么、怎么选，必须留给玩家。\n' +
+      '玩家的输入表示「他打算做什么」，不是把后续都授权给你 —— 把这句话引发的一两步结果写出来，就停下。\n' +
+      '不要替玩家决定具体做法、不要替玩家说话、不要替他做选择。\n' +
+      '不要在一轮里解决一整段过程（比如一整局游戏、一整场谈判、一次长途赶路）；' +
+      '把过程留给后面的回合，一轮只写开头和眼下的反应。\n' +
+      '每轮结尾停在一个需要玩家表态的地方：对方在等你回答、等你出价、等你落子、' +
+      '或者摆出了几个选项让你挑。'
+  },
+  brisk: {
+    label: '快节奏',
+    hint: '允许一轮里多推进一些',
+    text:
+      '【推进节奏】\n' +
+      '可以在一轮里多推进一些情节，但同样不要替玩家决定、不要替玩家说话。' +
+      '结尾仍然要停在一个需要玩家回应的位置。'
+  }
+};
+
+const DEFAULT_PACE_MODE = 'step';
+
+function convoPaceMode(convo) {
+  const mode = convo && convo.paceMode;
+  return Object.prototype.hasOwnProperty.call(PACE_MODES, mode) ? mode : DEFAULT_PACE_MODE;
+}
+
+function paceRuleText(convo) {
+  const mode = PACE_MODES[convoPaceMode(convo)];
+  return mode ? mode.text : PACE_MODES[DEFAULT_PACE_MODE].text;
 }
 
 /**
@@ -1279,13 +1332,14 @@ function roleplayRuleText(charName, me) {
  * 世界模型里模型扮演的是「整个世界和所有 NPC」，主角是玩家。
  * 所以必须明确允许第三人称、多 NPC 视角 —— 这正是角色扮演规则里禁止的事。
  */
-function gmRuleText(charName, me) {
+function gmRuleText(charName, me, convo) {
   return (
     `【主持规则】\n` +
-    `你是这个世界的叙述者，负责描写环境、推进情节，并扮演其中的所有 NPC。\n` +
+    `你是这个世界的叙述者，负责描写环境、扮演其中的所有 NPC，并让情节向前走。\n` +
     `把「${me}」当作故事的主角，用第二人称称呼对方。\n` +
     `用第三人称描写环境和 NPC；不同 NPC 要有各自的语气和立场，不要让所有人用同一种腔调说话。\n` +
-    `每次回复都要给出具体的情景与可选择的行动方向，让故事能继续推进。\n` +
+    `每次回复都要给出具体的情景，让玩家有得选。\n` +
+    `${paceRuleText(convo)}` +
     `不要提到自己是 AI、语言模型或助手。\n` +
     emphasisRuleText()
   );
@@ -1433,6 +1487,7 @@ function openPerspectiveModal() {
   }
 
   el.pNarration.value = convoNarrationMode(convo);
+  el.pPace.value = convoPaceMode(convo);
   el.pGm.checked = isGmMode(convo);
 
   el.perspectiveModal.classList.remove('hidden');
@@ -1450,6 +1505,10 @@ function applyPerspectiveFromForm() {
 
   const mode = el.pNarration.value;
   convo.narrationMode = Object.prototype.hasOwnProperty.call(NARRATION_MODES, mode) ? mode : DEFAULT_NARRATION_MODE;
+
+  const pace = el.pPace.value;
+  convo.paceMode = Object.prototype.hasOwnProperty.call(PACE_MODES, pace) ? pace : DEFAULT_PACE_MODE;
+
   convo.gmMode = el.pGm.checked;
   convo.updatedAt = now();
 
@@ -3027,7 +3086,8 @@ function buildApiMessages(convo, worldbookSection, ragSection) {
 
   // GM 模式换掉那段「不要跳出角色」：世界模型必须能写第三人称、切多个 NPC 视角，
   // 被「始终以第一人称」捆着会一轮缩回单角色腔调。
-  const ruleText = gmMode ? gmRuleText(charName, me) : roleplayRuleText(charName, me);
+  // 两种规则里都带上了「推进节奏」—— 否则模型会一口气把整场戏演完，玩家只剩看的份。
+  const ruleText = gmMode ? gmRuleText(charName, me, convo) : roleplayRuleText(charName, me, convo);
   if (character || gmMode) parts.push(ruleText);
 
   // 玩家角色：从世界书列表页「游玩」进来的会话才有这段。
@@ -5023,6 +5083,7 @@ function bindEvents() {
   el.btnPickBg.addEventListener('click', pickChatBackground);
   el.btnClearBg.addEventListener('click', () => persistAppearance({ chatBackground: '' }));
   el.pNarration.addEventListener('change', applyPerspectiveFromForm);
+  el.pPace.addEventListener('change', applyPerspectiveFromForm);
   el.pGm.addEventListener('change', applyPerspectiveFromForm);
   el.perspectiveModal.addEventListener('click', (event) => {
     if (event.target === el.perspectiveModal) closePerspectiveModal();
@@ -5592,7 +5653,7 @@ async function generateWorldOpening(convo, book) {
 
   try {
     const me = convoUserName(convo);
-    const parts = [gmRuleText('', me)];
+    const parts = [gmRuleText('', me, convo)];
     const player = convoPlayer(convo);
     if (player && player.profile) parts.push(`【玩家角色：${player.name || me}】\n${player.profile}`);
     const cast = worldbookCast(convo);
