@@ -1293,10 +1293,13 @@ function convoPanelDef(convo, name) {
 /**
  * 把一个值按字段范围夹回去。返回夹过之后的字符串。
  * 没有定义 / 不是数值字段 / 解析不出数字，都原样返回。
+ * defs 可以不传（默认用会话上的定义表）—— 同步历史时定义表还在构建中，
+ * 那时要显式把新的传进来，否则新推断出来的范围当轮不生效。
  */
-function clampPanelValue(convo, name, value) {
-  const def = convoPanelDef(convo, name);
-  if (!def) return value;
+function clampPanelValue(convo, name, value, defs) {
+  const table = defs && typeof defs === 'object' ? defs : convoPanelDefs(convo);
+  const def = table[name];
+  if (!def || typeof def !== 'object') return value;
   return clampFieldValue(value, def).value;
 }
 
@@ -1323,6 +1326,7 @@ function syncConvoPanel(convo) {
   const order = [...existingFields];
   const known = new Set(order);
   const latest = new Map();
+  const defs = { ...convoPanelDefs(convo) };
 
   for (const msg of convo.messages) {
     if (!msg || msg.role !== 'assistant') continue;
@@ -1335,6 +1339,12 @@ function syncConvoPanel(convo) {
         if (order.length >= MAX_PANEL_FIELDS) continue;
         order.push(name);
         known.add(name);
+        // 模型自己冒出来的字段：从值的形状补个定义（「63/100」= 带范围的数值），
+        // 否则它永远没有进度条、也不受范围约束。
+        if (!defs[name]) {
+          const inferred = inferPanelDef(name, value);
+          if (inferred) defs[name] = inferred;
+        }
       }
       latest.set(name, value);
     }
@@ -1346,11 +1356,12 @@ function syncConvoPanel(convo) {
   const panel = {};
   for (const name of order) {
     const value = latest.has(name) ? latest.get(name) : existingPanel[name];
-    if (value !== undefined) panel[name] = clampPanelValue(convo, name, value);
+    if (value !== undefined) panel[name] = clampPanelValue(convo, name, value, defs);
   }
 
   convo.panelFields = order;
   convo.panel = panel;
+  convo.panelDefs = defs;
 
   return beforeFields !== order.join('\u0001') || beforePanel !== JSON.stringify(panel);
 }
@@ -1425,8 +1436,28 @@ function panelGroupHeader(title) {
   return `—— ${title} ——`;
 }
 
-/** 面板拼成注入块；没有面板就返回空串 */
-function formatPanelForPrompt(convo) {
+/**
+ * 从值的形状推断字段定义 —— 只用于**模型自己冒出来的字段**。
+ *
+ * 「【好感度】：63/100」这种「数字/数字」的形状本身就说明了它是个带范围的数值：
+ * 分子是当前值、分母是满值。不做这一步的话，卡片里没声明过的数值字段永远
+ * 拿不到进度条，明明值里已经写着满值是多少。
+ *
+ * 只认这一个形状（中间一个斜杠、两边都是数字），而且只在字段还没有定义时补。
+ * 刻意**不**推断 min：分母只能告诉我们上限，下限猜不出来（写 0 会错，
+ * 留空则由夹取逻辑按「只夹上限」处理）。
+ */
+function inferPanelDef(name, value) {
+  const m = String(value == null ? '' : value).trim().match(/^([-+]?\d+(?:\.\d+)?)\s*\/\s*([-+]?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+
+  const total = Number(m[2]);
+  if (!isFinite(total) || total <= 0) return null;
+
+  return { type: 'meter', max: total };
+}
+
+/** 面板拼成注入块；没有面板就返回空串 */function formatPanelForPrompt(convo) {
   const fields = convoPanelFields(convo);
   if (!fields.length) return '';
 
@@ -1855,6 +1886,8 @@ function appendPanelRow(convo, name, value, container) {
   // 数值字段补一条进度条 —— 光看「60/100」不知道离满还有多远。
   const progress = fieldProgress(String(value == null ? '' : value), def);
   if (progress) {
+    // 带条的行要占满整行，见 style.css 里的 .panel-row.has-bar
+    row.classList.add('has-bar');
     const bar = h(
       'div',
       { class: 'panel-bar', role: 'progressbar' },

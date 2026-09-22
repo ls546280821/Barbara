@@ -1980,6 +1980,40 @@ await scenario('剧情选项', async () => {
     JSON.stringify($$('#panel-fields .panel-name').map((n) => n.textContent))
   );
 
+  // 「好感度」是模型自己输出、这个角色卡上没声明过的字段。
+  // 它的值写成「63/100」，从形状就能看出是个带范围的数值 —— 该有进度条。
+  // （以前只认角色卡上声明过的属性，模型自己冒出来的数值永远没有进度条。）
+  {
+    const favorRow = $$('#panel-fields .panel-row').find(
+      (r) => (r.querySelector('.panel-name') || {}).textContent === '好感度'
+    );
+    check('模型自己给的数值字段也认出了满值（/100）', !!favorRow && !!favorRow.querySelector('.panel-unit'),
+      favorRow ? favorRow.innerHTML.slice(0, 160) : '没找到「好感度」那一行');
+    const inferredBar = favorRow && favorRow.querySelector('.panel-bar');
+    check('模型自己给的数值字段也有进度条（从「63/100」的形状推断）', !!inferredBar,
+      favorRow ? favorRow.innerHTML.slice(0, 160) : '没找到');
+    check(
+      '推断出来的满值接进了进度条（63/100 → 63%）',
+      !!inferredBar && inferredBar.querySelector('.panel-bar-fill').style.width === '63%',
+      inferredBar ? inferredBar.querySelector('.panel-bar-fill').style.width : '没有进度条'
+    );
+
+    // 推断出来的范围也要真的生效：手填越界值会被夹回来
+    const input = favorRow && favorRow.querySelector('.panel-value');
+    if (input) {
+      setValue(input, '150');
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      await sleep(250);
+      const cv = await window.barbara.getConversations();
+      const ca = cv.conversations.find((c) => c.id === cv.activeId);
+      check(
+        '推断出来的范围也真的夹得住（150 → 100/100）',
+        !!ca && ca.panel['好感度'] === '100/100',
+        JSON.stringify(ca && ca.panel['好感度'])
+      );
+    }
+  }
+
   // --- 4) 点一个选项 → 当作玩家回复发出去，选项消失 ---
   const beforeCount = $$('#messages .msg').length;
   const pick = optionBtns[0];

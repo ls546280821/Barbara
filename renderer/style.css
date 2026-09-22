@@ -2441,6 +2441,10 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
 /* ------------------------------ 状态面板 ------------------------------ */
 
 /* 世界模型的状态栏。放在消息区上方，可折叠；字段值可以直接改。 */
+/* 世界模型的状态栏。放在消息区上方，可折叠；字段值可以直接改。
+   高度必须有个上限（否则字段多的会话会把聊天区挤没），
+   但也不能太紧 —— 里面现在有进度条和可点的剧情选项，
+   上限太小会从按钮中间切断、看着像坏了。超出时内部滚动。 */
 .panel-box {
   flex: 0 0 auto;
   margin: 0 0 10px;
@@ -2448,7 +2452,7 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   border: 1px solid var(--border-soft);
   border-radius: 10px;
   background: var(--bg-side);
-  max-height: 30vh;
+  max-height: 42vh;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -2515,32 +2519,44 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   align-items: start;
 }
 
-/* 一个分组 = 一块：小标题 + 该组的字段。像他那边的「状态 / 关系 / 背包」分区。 */
+/* 一个分组 = 一块：小标题 + 该组的字段。
+   分组各自成块而不是把标题插进网格，是为了让「哪几个字段是一组」一眼看得出。
+   块内部用和面板同一套列宽，字段就不会有的排两列、有的挤成一列。 */
 .panel-group {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 5px 10px;
   min-width: 0;
+  align-items: start;
 }
 
-.panel-row { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+/* 带进度条的数值行跨满整块：进度条要够长才看得出比例，
+   而且这样不管网格分成几列，行都是齐的（不会出现上面两列、下面一列）。 */
+.panel-row.has-bar { grid-column: 1 / -1; flex-wrap: wrap; }
 
-/* 分组小标题 */
+/* 分组标题跨满整块 —— 它是标题，不该占一列 */
+.panel-group > .panel-group-title { grid-column: 1 / -1; }
+
+.panel-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+
+/* 分组小标题。跟面板标题同一套语气：小一号、用 faint 色，不用重色块。 */
 .panel-group-title {
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-muted, var(--text-faint));
+  color: var(--text-faint);
   letter-spacing: 0.02em;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 3px;
+  margin-bottom: 1px;
 }
 
-/* 数值字段的进度条。占满整行（因为行允许换行），高 4px 不抢视线。 */
+/* 进度条：底色用 border-soft（比 bg-input 浅，在 --bg-side 的底上也能看出槽位），
+   填充用主题强调色，和按钮/选中态同一个色，不引入第二种颜色。 */
 .panel-bar {
   flex: 1 0 100%;
-  height: 4px;
+  height: 3px;
   border-radius: 999px;
-  background: var(--bg-input);
+  background: var(--border-soft);
   overflow: hidden;
   margin-top: 1px;
 }
@@ -2563,13 +2579,10 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
 /* 剧情选项那块：按钮竖着排满整行，点一下就发出去 */
 .panel-options { gap: 4px; }
 
+/* 选项常常是一句话，允许多行（.suggest-btn 本身是单行胶囊，这里放开） */
 .panel-option-btn {
-  width: 100%;
-  text-align: left;
-  /* 选项常常是一句话，允许多行；和「帮我想想」的胶囊按钮区分开 */
   white-space: normal;
-  line-height: 1.35;
-  border-radius: 7px;
+  line-height: 1.45;
 }
 
 /* 角色编辑器里的「剧情选项」配置区 */
@@ -2590,6 +2603,13 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
 }
 
 .c-options-config .field { margin: 0; }
+
+/* 带 Progress 条的数值行：值通常就几个字符（63），输入框不用占满 ——
+   占满了后面拖一大片空白，还得把「/100」推到很远。 */
+.panel-row.has-bar input.panel-value {
+  flex: 1 1 auto;
+  max-width: 96px;
+}
 
 /* 数值字段的「/100」后缀：不是可编辑内容，所以挪到输入框外面 */
 .panel-unit {
