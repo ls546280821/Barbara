@@ -433,6 +433,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  /* 对话窗口背景图（外观设置里选的），没设就是 none */
+  background-image: var(--chat-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
   /* 注意：这里不能用 scroll-behavior: smooth。
      流式输出时每 50ms 就要把滚动条拽到底一次，而 smooth 会让每次赋值都启动
      一段几百毫秒的平滑动画 —— 动画还没跑完就被下一个 token 重新设定目标，
@@ -493,6 +498,8 @@ body {
   overflow-wrap: break-word;
   word-break: break-word;
   user-select: text;
+  /* 字号来自「对话窗口」设置；里面的标题/表格/心理旁白都用 em 跟着缩 */
+  font-size: var(--chat-font-size, 14px);
 }
 
 .msg.user .bubble {
@@ -515,12 +522,14 @@ body {
   font-size: 12.5px;
 }
 
-/* markdown 排版 */
+/* markdown 排版。里面的尺寸都用 em —— 跟着「对话窗口」里的字号设置一起缩，
+   不然把正文调到 22px 时，标题还是死的 15px，看着就不对了。
+   （em 的基准是 .bubble 的 font-size；下面括号里是 14px 时的实际值） */
 .bubble p { margin: 0 0 8px; }
 .bubble p:last-child { margin-bottom: 0; }
 .bubble ul, .bubble ol { margin: 0 0 8px; padding-left: 22px; }
 .bubble li { margin: 2px 0; }
-.bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; font-size: 15px; }
+.bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; font-size: 1.07em; } /* 15px */
 .bubble h1:first-child, .bubble h2:first-child, .bubble h3:first-child { margin-top: 0; }
 .bubble blockquote {
   margin: 6px 0;
@@ -530,6 +539,23 @@ body {
 }
 .bubble hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .bubble a { color: var(--accent); }
+
+/* 重点的两档样式。
+   一档加粗：关键信息、数值，扫一眼能停住。颜色可以在「对话窗口」里单独设
+   （光加粗有时候还是不够跳），没设就跟随正文颜色。
+   二档高亮：真正不能错过的（危险、转折、重要线索），加粗 + 主题色 + 一点底色。 */
+.bubble strong {
+  font-weight: 700;
+  color: var(--chat-bold-color, inherit);
+}
+
+.bubble .msg-em {
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 0 3px;
+  border-radius: 3px;
+}
 
 /* 心理描写：弱化的旁白块，和正文一眼区分开。
    用带透明度的颜色，浅色/夜间两套主题都不用各写一遍。 */
@@ -541,7 +567,7 @@ body {
   background: rgba(64, 158, 255, 0.06);
   color: var(--text-dim);
   font-style: italic;
-  font-size: 12.5px;
+  font-size: 0.89em; /* 12.5px */
   line-height: 1.7;
 }
 
@@ -554,7 +580,7 @@ body {
   background: rgba(150, 130, 200, 0.06);
   color: var(--text-dim);
   font-style: italic;
-  font-size: 12.5px;
+  font-size: 0.89em; /* 12.5px */
   line-height: 1.7;
 }
 
@@ -566,7 +592,7 @@ body {
 
 .bubble code {
   font-family: Consolas, "Courier New", monospace;
-  font-size: 12.5px;
+  font-size: 0.89em; /* 12.5px */
   background: var(--code-bg);
   color: var(--code-text);
   padding: 1px 5px;
@@ -580,16 +606,18 @@ body {
   padding: 12px 14px;
   overflow-x: auto;
   margin: 8px 0;
+  /* 代码块比正文小一档（原来是 12.5px），里面的 code 再跟着它走 */
+  font-size: 0.89em;
 }
 
 .bubble pre code {
   background: transparent;
   padding: 0;
-  font-size: 12.5px;
+  font-size: 1em; /* 跟 pre 里的字号走 */
   line-height: 1.55;
 }
 
-.bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.bubble table { border-collapse: collapse; margin: 8px 0; font-size: 0.93em; /* 13px */ }
 .bubble th, .bubble td { border: 1px solid var(--border); padding: 4px 10px; }
 .bubble th { background: var(--th-bg); }
 
@@ -736,7 +764,7 @@ body {
 
 #input::placeholder { color: var(--text-faint); }
 
-.btn-send { flex: 0 0 auto; padding: 8px 20px; }
+.btn-send { flex: 0 0 auto; padding: 8px 20px; height: stretch; border-radius: var(--radius); }
 
 .composer-hint {
   max-width: 860px;
@@ -1229,6 +1257,24 @@ body {
 .player-card { max-width: 560px; }
 .player-body { display: flex; flex-direction: column; }
 
+/* 「用角色卡当自己」下面那行预览：头像 + 会被带进世界的东西 */
+.player-char-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.player-char-preview img {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 /* 侧边栏里表示「你正在这个页面」 */
 .sidebar .btn.active {
   background: var(--accent-soft);
@@ -1310,6 +1356,34 @@ body {
 /* .panel-del 平时是透明的，靠「悬停行」浮现 —— 但那只对 .panel-row 生效，
    属性区这一行是 .attr-row，得自己补一条，否则删除按钮永远看不见 */
 .attr-row:hover .panel-del { opacity: 1; }
+
+/* 批量粘贴区：平时收着，点「粘贴文本」才展开 */
+.attr-paste {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.attr-paste textarea {
+  width: 100%;
+  min-height: 0;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.attr-paste-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.attr-paste-foot .field-help { margin: 0; }
+.attr-paste-foot .btn { flex: 0 0 auto; }
 
 .char-head-row {
   display: flex;
@@ -1508,6 +1582,9 @@ body {
 
 .field-grid .field > .field-label { padding-top: 0; }
 .field-grid .field > .field-help { grid-column: 1; }
+
+/* 身份三件套（年龄 / 性别 / 种族）挤一行 —— 都是短字段 */
+.field-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 /* 数字等宽，位数变化时不会左右抖 */
 .field-grid input[type="number"] { font-variant-numeric: tabular-nums; }
@@ -2039,13 +2116,48 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   min-height: 0;
 }
 
+/* 收起 = 只留标题那一条细条（不是整个消失）。
+   这样「随时能点开」这件事是看得见的，也不占地方。 */
+.panel-box.collapsed { padding-bottom: 10px; }
+.panel-box.collapsed .panel-fields { display: none; }
+.panel-box.collapsed .panel-head { margin-bottom: 0; }
+
 .panel-head {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
 }
+
+/* 「当前状态」+ 箭头整体是一个按钮：一眼看出能开能合 */
+.panel-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px 2px 2px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.panel-toggle:hover { background: var(--border-soft); }
+
+.panel-caret {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+
+/* 收起时箭头转成「指向右」，和展开时的「指向下」区分开 */
+.panel-box.collapsed .panel-caret { transform: rotate(-90deg); }
 
 .panel-title { font-size: 12.5px; color: var(--text); font-weight: 600; }
 .panel-hint { flex: 1 1 auto; font-size: 11px; color: var(--text-faint); }
@@ -2105,6 +2217,100 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
 .panel-del:hover { color: var(--danger-text, #d9534f); background: var(--bg-input); }
 
 /* ------------------------------ 视角设置弹窗 ------------------------------ */
+
+/* ------------------------------ 对话窗口外观弹窗 ------------------------------ */
+
+.appearance-card { max-width: 560px; }
+
+/* 一行控件：滑块/色盘 + 输入框 + 按钮 */
+.appearance-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 滑块。Chromium 默认那条「还没选到」的轨道，浅色下接近纯黑、夜间又偏亮，
+   和这个面板的配色完全对不上（用户反馈「偏黑」就是这个）。
+   所以轨道自己画：已选部分用主题色，未选部分用和开关同一条轨道色，
+   比例靠 --range-fill 这个变量跟着值走（JS 里更新）。 */
+.appearance-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 18px;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.appearance-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--range-fill, 50%),
+    var(--toggle-track) var(--range-fill, 50%)
+  );
+}
+
+.appearance-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  /* 让 16px 的拇指在 6px 的轨道上居中：(6 - 16) / 2 */
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  /* 外面套一圈面板底色，拇指看起来就是「浮」在轨道上的 */
+  border: 2px solid var(--bg-elev);
+  box-shadow: 0 1px 3px rgba(23, 37, 66, 0.25);
+}
+
+.appearance-row input[type="range"]:focus-visible {
+  outline: none;
+  border-radius: 999px;
+  box-shadow: var(--focus-ring);
+}
+
+.appearance-value {
+  flex: 0 0 auto;
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 色盘：原生控件的默认外观在各平台差很多，这里统一成一个小方块 */
+.appearance-row input[type="color"] {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  cursor: pointer;
+}
+
+.appearance-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
+
+.appearance-bg-preview {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  max-height: 120px;
+}
+
+.appearance-bg-preview img {
+  display: block;
+  width: 100%;
+  max-height: 120px;
+  object-fit: cover;
+}
 
 .perspective-card { max-width: 560px; }
 .perspective-note { margin: 4px 0 0; }

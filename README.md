@@ -121,7 +121,7 @@ barbara/
     └── js/          界面逻辑（ES module，不需要打包器）
         ├── main.js      入口 · 组装消息（人设、宏、示例对话）· 大部分功能还在这
         ├── core/        常量 / 状态 / DOM 引用 / preload 桥 / 工具
-        ├── ui/          提示条 / 确认框 / 主题 / Markdown
+        ├── ui/          提示条 / 确认框 / 主题 / Markdown / 建 DOM 的小工具
         └── data/        持久化等纯逻辑
 ```
 

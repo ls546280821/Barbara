@@ -29,6 +29,11 @@ export function renderInline(text) {
   out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
   out = out.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
 
+  // ==高亮== —— 比加粗更重的一档：加粗 + 主题色 + 一点底色。
+  // 长段落的对话容易看累，靠它把「关键的那一句」拎出来。
+  // 用 == 是 Markdown 高亮的通行写法（Obsidian / Typora 都认），模型也更容易照做。
+  out = out.replace(/==([^=\n]+)==/g, '<mark class="msg-em">$1</mark>');
+
   // 链接：只放行 http/https，其他一律当普通文字
   const links = [];
   out = out

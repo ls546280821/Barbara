@@ -287,6 +287,12 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   click('#btn-new-char');
   await waitFor('角色编辑器打开', () => shown('#chars-modal'));
   setValue('#c-name', '属性测试角色');
+  setValue('#c-desc', '属性测试角色的设定文本');
+  setValue('#c-personality', '沉默寡言');
+  setValue('#c-age', '18');
+  setValue('#c-gender', '女');
+  check('新建角色时种族默认就是人类', byId('c-race').value === '人类', byId('c-race').value);
+  setValue('#c-race', '精灵');
 
   const quick = $$('#c-attr-quick .attr-quick-btn');
   check('快捷候选词按钮出现了', quick.length === 3, `实际 ${quick.length} 个`);
@@ -324,6 +330,11 @@ await scenario('属性：从角色卡种到状态面板', async () => {
     !!mine && mine.attributes[0].name === '金币' && mine.attributes[0].value === '100' && mine.attributes[1].value === '布衣',
     JSON.stringify(mine && mine.attributes)
   );
+  check(
+    '身份三项也落盘了',
+    !!mine && mine.age === '18' && mine.gender === '女' && mine.race === '精灵',
+    JSON.stringify({ age: mine && mine.age, gender: mine && mine.gender, race: mine && mine.race })
+  );
 
   // --- 3) 点「聊天」绑定角色 → 属性应该种进状态面板 ---
   click('#btn-close-chars');
@@ -346,6 +357,20 @@ await scenario('属性：从角色卡种到状态面板', async () => {
     goldRow ? goldRow.querySelector('input').value : '没找到「金币」那一行'
   );
 
+  // 单角色对话（角色库点「聊天」）也得把身份四项带上 ——
+  // 这一条当初漏了，结果 16 岁的角色被 AI 回复成 21 岁
+  check('单角色对话也把身份种进了面板', ['姓名', '年龄', '性别', '种族'].every((n) => panelNames.includes(n)), JSON.stringify(panelNames));
+  const identityValue = (field) => {
+    const row = panelRows.find((r) => r.querySelector('.panel-name').textContent === field);
+    return row ? row.querySelector('input').value : null;
+  };
+  check(
+    '身份取的是角色卡上的值',
+    identityValue('年龄') === '18' && identityValue('性别') === '女' && identityValue('种族') === '精灵',
+    JSON.stringify({ 年龄: identityValue('年龄'), 性别: identityValue('性别'), 种族: identityValue('种族') })
+  );
+  check('姓名取的是角色名', identityValue('姓名') === '属性测试角色', String(identityValue('姓名')));
+
   // --- 4) 发一条：注入给模型的消息里必须真的带上面板 ---
   // 断言在宿主侧做（要看 chat:send 的 payload），这里只负责发出去
   setValue('#input', '冒烟测试：属性注入');
@@ -354,7 +379,50 @@ await scenario('属性：从角色卡种到状态面板', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 9：聊天 —— 发一条能收到回复
+//  场景 9：状态面板 —— 默认收起，随时展开
+// ---------------------------------------------------------------------------
+await scenario('状态面板：默认收起 / 随时展开', async () => {
+  await waitFor('面板在', () => shown('#panel-box') && !!byId('btn-panel-collapse'));
+
+  const fieldsH = () => byId('panel-fields').getBoundingClientRect().height;
+  const boxH = () => Math.round(byId('panel-box').getBoundingClientRect().height);
+
+  // 默认收起：只留一条细条，但一直在那儿
+  check('默认就是收起的', byId('panel-box').classList.contains('collapsed'));
+  check('收起时字段区不显示', fieldsH() === 0, `字段区高度 ${fieldsH()}`);
+  const collapsedH = boxH();
+  check('收起时面板还在（一根细条）', shown('#panel-box') && collapsedH > 0 && collapsedH < 80, `${collapsedH}px`);
+
+  // 关键：收起之后那个开关还得看得见、点得到，否则「随时打开」就是空话
+  const toggleBox = byId('btn-panel-collapse').getBoundingClientRect();
+  check('收起后开关仍然可见可点', toggleBox.height > 0 && toggleBox.width > 0, `${Math.round(toggleBox.width)}×${Math.round(toggleBox.height)}`);
+
+  click('#btn-panel-collapse');
+  await sleep(120);
+  const expandedH = boxH();
+  check('点一下就展开', fieldsH() > 0 && !byId('panel-box').classList.contains('collapsed'));
+  check('展开后 aria 也对', byId('btn-panel-collapse').getAttribute('aria-expanded') === 'true');
+  check('展开确实比收起高', expandedH > collapsedH, `${collapsedH} → ${expandedH}`);
+
+  click('#btn-panel-collapse');
+  await sleep(120);
+  check('再点一下又收起', fieldsH() === 0);
+
+  // 整条标题栏都能点（不必瞄准那个小箭头）
+  click('#panel-head');
+  await sleep(120);
+  check('点标题栏空白处也能展开', fieldsH() > 0);
+
+  click('#panel-head');
+  await sleep(120);
+  check('点标题栏空白处也能收起', fieldsH() === 0);
+
+  // 右上角那个「状态」按钮已经去掉了，别再回来
+  check('顶栏的「状态」按钮已移除', !byId('btn-panel-toggle'));
+});
+
+// ---------------------------------------------------------------------------
+//  场景 10：聊天 —— 发一条能收到回复
 // ---------------------------------------------------------------------------
 await scenario('聊天：发送与回复', async () => {
   click('#convo-list .convo-item');
@@ -376,10 +444,93 @@ await scenario('聊天：发送与回复', async () => {
   check('没有出现错误气泡', $$('#messages .msg.error').length === 0);
   check('发送按钮恢复可用（没有卡在流式状态）', byId('btn-send').disabled === false);
   check('停止按钮已隐藏', shown('#btn-stop') === false);
+
+  // 重点的两档样式：**加粗** 和 ==高亮== 要变成真元素，而不是原样显示星号/等号
+  const strong = $('#messages strong');
+  check('**加粗** 渲染成了 <strong>', !!strong && strong.textContent === '这是加粗', strong ? strong.textContent : `原始文本里有没有 **：${$('#messages').textContent.includes('**')}`);
+  const em = $('#messages .msg-em');
+  check('==高亮== 渲染成了 .msg-em', !!em && em.textContent === '这是高亮', em ? em.textContent : '没找到 .msg-em');
+  check('标记符号本身没有露出来', !$('#messages').textContent.includes('**') && !$('#messages').textContent.includes('=='), $('#messages').textContent.slice(0, 80));
 });
 
 // ---------------------------------------------------------------------------
-//  场景 10：世界书 —— 新建条目
+//  场景 11：对话窗口外观（字号 / 加粗颜色 / 背景图）
+// ---------------------------------------------------------------------------
+await scenario('对话窗口外观', async () => {
+  click('#btn-appearance');
+  await waitFor('外观弹窗打开', () => shown('#appearance-modal'));
+  check(
+    '三样控件都在（字号 / 颜色 / 背景）',
+    !!byId('appearance-fontsize') && !!byId('appearance-boldcolor-text') && !!byId('btn-pick-bg')
+  );
+
+  const bubble = $('#messages .bubble');
+  const strong = $('#messages .bubble strong');
+  check('聊天里有个 <strong> 可以用来验颜色', !!bubble && !!strong);
+
+  // --- 字号 ---
+  const beforeSize = getComputedStyle(bubble).fontSize;
+  setValue('#appearance-fontsize', '20');
+  byId('appearance-fontsize').dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  check('字号改了正文的实际大小', getComputedStyle(bubble).fontSize === '20px', `${beforeSize} → ${getComputedStyle(bubble).fontSize}`);
+  check('旁边的数字也跟着变', byId('appearance-fontsize-value').textContent === '20px', byId('appearance-fontsize-value').textContent);
+  check('字号落盘了', (await window.barbara.getSettings()).settings.chatFontSize === 20);
+
+  // 滑块的「已选比例」是自己用渐变画的（原生那条未选轨道在浅色下是黑的），
+  // 所以值一变就得跟着更新 —— 12–22 的滑条拉到 20 是 80%
+  const fill = byId('appearance-fontsize').style.getPropertyValue('--range-fill');
+  check('滑块的已选比例跟着值走', fill === '80%', `--range-fill = ${fill}`);
+
+  // --- 加粗颜色：手填 ---
+  setValue('#appearance-boldcolor-text', '#e06c75');
+  byId('appearance-boldcolor-text').dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  check('加粗字真的变色了', getComputedStyle(strong).color === 'rgb(224, 108, 117)', getComputedStyle(strong).color);
+  check('颜色落盘了', (await window.barbara.getSettings()).settings.chatBoldColor === '#e06c75');
+
+  // 不带 # 也认
+  setValue('#appearance-boldcolor-text', '00aaff');
+  byId('appearance-boldcolor-text').dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  check('不带 # 也认', (await window.barbara.getSettings()).settings.chatBoldColor === '#00aaff', (await window.barbara.getSettings()).settings.chatBoldColor);
+
+  // 乱填要挡下来，而且不能把原来的值冲掉
+  setValue('#appearance-boldcolor-text', 'red');
+  byId('appearance-boldcolor-text').dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(250);
+  check(
+    '乱填的颜色被拒绝、原值不变',
+    (await window.barbara.getSettings()).settings.chatBoldColor === '#00aaff',
+    (await window.barbara.getSettings()).settings.chatBoldColor
+  );
+
+  // --- 背景图：走真实的「选图 → 压缩 → 存起来」链路 ---
+  click('#btn-pick-bg');
+  await waitFor('背景预览出现', () => shown('#appearance-bg-preview') && !!$('#appearance-bg-preview img'), 10000);
+  check('消息区挂上了背景图', getComputedStyle($('#messages')).backgroundImage.includes('data:image'), getComputedStyle($('#messages')).backgroundImage.slice(0, 50));
+  check(
+    '背景图落盘了',
+    String((await window.barbara.getSettings()).settings.chatBackground).startsWith('data:image/'),
+    String((await window.barbara.getSettings()).settings.chatBackground).slice(0, 40)
+  );
+
+  // --- 清除 ---
+  click('#btn-clear-bg');
+  await sleep(250);
+  check('清掉之后消息区没有背景图', !getComputedStyle($('#messages')).backgroundImage.includes('data:image'), getComputedStyle($('#messages')).backgroundImage);
+  check('没背景时「清除」是禁用的', byId('btn-clear-bg').disabled === true);
+
+  click('#btn-boldcolor-reset');
+  await sleep(250);
+  check('复位后加粗颜色跟随正文', (await window.barbara.getSettings()).settings.chatBoldColor === '');
+
+  click('#btn-close-appearance');
+  await waitFor('外观弹窗关闭', () => !shown('#appearance-modal'));
+});
+
+// ---------------------------------------------------------------------------
+//  场景 12：世界书 —— 新建条目
 // ---------------------------------------------------------------------------
 await scenario('世界书：新建条目', async () => {
   click('#btn-worldbooks');
@@ -438,7 +589,7 @@ await scenario('世界书：本书角色', async () => {
 // ---------------------------------------------------------------------------
 //  场景 12：进入世界 —— 玩家角色弹窗
 // ---------------------------------------------------------------------------
-await scenario('进入世界：玩家角色', async () => {
+await scenario('进入世界：用角色卡当自己', async () => {
   click('#btn-worldbooks');
   await waitFor('切到世界书页面', () => shown('#view-worldbooks'));
 
@@ -446,8 +597,56 @@ await scenario('进入世界：玩家角色', async () => {
   await waitFor('玩家角色弹窗打开', () => shown('#player-modal'));
   check('弹窗里有角色名输入框', !!byId('player-name'));
 
-  click('#btn-cancel-player');
-  await waitFor('玩家角色弹窗关闭', () => !shown('#player-modal'));
+  // 角色库里有「属性测试角色」（带金币/上衣两个属性）
+  const options = $$('#player-char option').map((o) => o.textContent);
+  check('下拉里有「自己写一个」和角色库的人', options.includes('（自己写一个）') && options.includes('属性测试角色'), JSON.stringify(options));
+
+  // --- 选一张角色卡：名字和设定应该自动填进去 ---
+  const cardId = $$('#player-char option').find((o) => o.textContent === '属性测试角色').value;
+  setValue('#player-char', cardId).dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(80);
+
+  check('名字被自动填上了', byId('player-name').value === '属性测试角色', byId('player-name').value);
+  check('设定也带过来了', byId('player-profile').value.length > 0, `${byId('player-profile').value.length} 字`);
+  check('预览说明了会带上哪些属性', shown('#player-char-preview') && byId('player-char-preview').textContent.includes('金币'), byId('player-char-preview').textContent);
+
+  // 填完还能改 —— 改了以你改的为准
+  setValue('#player-name', '改过的名字');
+  check('选了之后名字仍然可改', byId('player-name').value === '改过的名字');
+
+  // --- 开始游玩：面板里要出现这张卡的属性 ---
+  click('#btn-start-play');
+  await waitFor('进入世界', () => shown('#view-chat') && !shown('#player-modal'));
+  await waitFor('状态面板出现', () => shown('#panel-box'));
+
+  const panelNames = $$('#panel-fields .panel-name').map((n) => n.textContent);
+  const panelValue = (field) => {
+    const row = $$('#panel-fields .panel-row').find((r) => r.querySelector('.panel-name').textContent === field);
+    return row ? row.querySelector('input').value : null;
+  };
+
+  check('玩家角色卡的属性种进了面板', panelNames.includes('金币') && panelNames.includes('上衣'), JSON.stringify(panelNames));
+
+  // 身份四件套也要进面板 —— 世界里时间会走、剧情会推，这些都会变
+  check('身份四件套也在面板里', ['姓名', '年龄', '性别', '种族'].every((n) => panelNames.includes(n)), JSON.stringify(panelNames));
+  check('姓名用的是你改过的名字', panelValue('姓名') === '改过的名字', String(panelValue('姓名')));
+  check('年龄/性别/种族来自角色卡', panelValue('年龄') === '18' && panelValue('性别') === '女' && panelValue('种族') === '精灵', JSON.stringify({ 年龄: panelValue('年龄'), 性别: panelValue('性别'), 种族: panelValue('种族') }));
+
+  check('值来自角色卡的初始值', panelValue('金币') === '100', String(panelValue('金币')));
+
+  // 会话里记下了「你用哪张卡当自己」，而且以你改过的名字为准
+  await sleep(200); // persistConversations 是防抖的
+  const convos = (await window.barbara.getConversations()).conversations;
+  const worldConvo = convos.find((c) => c.title === '冒烟测试世界');
+  check('会话里记下了玩家角色', !!worldConvo && !!worldConvo.player, JSON.stringify(worldConvo && worldConvo.player));
+  check('用的是你改过的名字', !!worldConvo && worldConvo.player.name === '改过的名字', worldConvo ? worldConvo.player.name : '');
+  check('也记下了是哪张角色卡', !!worldConvo && worldConvo.player.characterId === cardId, worldConvo ? String(worldConvo.player.characterId) : '');
+  check('玩家角色带上了设定文本', !!worldConvo && String(worldConvo.player.profile).length > 0);
+
+  // 发一条：让「身份 + 属性真的注入给了模型」这件事也能被宿主验到
+  setValue('#input', '冒烟测试：世界里的状态');
+  click('#btn-send');
+  await waitFor('收到回复', () => $('#messages').textContent.includes('冒烟测试回复'), 8000);
 });
 
 notes.push(`磁盘上的角色数：${(await savedCharacters()).length}`);
@@ -455,9 +654,138 @@ notes.push(`磁盘上的世界书数：${(await savedWorldbooks()).length}`);
 notes.push(`会话数：${$$('#convo-list .convo-item').length}`);
 
 // ---------------------------------------------------------------------------
-//  留给宿主做「真实鼠标悬停」验证
-//  :hover 只认真实指针，页面里模拟不出来（派发 mouseover 事件不算），
-//  所以这里只把卡片摆好、把坐标交回去，由 smoke-test.js 发输入事件。
+//  场景 13：角色卡 —— 每个字段都能原样存下来
+//
+//  为什么专门做这个：主进程的 normalizeCharacter 是**白名单式**的，
+//  它只保留显式列出来的字段。漏一个 ≠ 报错，而是「静默丢掉」——
+//  「属性」当初就是这么丢的，而当时的假后端不做归一化，测试全绿。
+//  这里把每个可编辑字段都填上不同的值，再逐个核对回来没有。
+// ---------------------------------------------------------------------------
+await scenario('角色卡：字段往返不丢', async () => {
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click('#btn-new-char');
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+
+  const NAME = '字段往返测试';
+  setValue('#c-name', NAME);
+  setValue('#c-tags', '甲, 乙');
+  setValue('#c-age', '23');
+  setValue('#c-gender', '男');
+  setValue('#c-race', '龙');
+  setValue('#c-desc', 'D-描述');
+  setValue('#c-personality', 'P-性格');
+  setValue('#c-scenario', 'S-场景');
+  setValue('#c-first', 'F-开场白');
+  setValue('#c-example', 'E-示例');
+  setValue('#c-system', 'SP-系统提示');
+  setValue('#c-post', 'PH-后指令');
+  setValue('#c-notes', 'CN-备注');
+
+  setValue('#c-attr-new', '金币');
+  click('#btn-add-attr');
+  await waitFor('属性行出现', () => $$('#c-attr-list .attr-row').length === 1);
+  setValue($$('#c-attr-list .attr-row')[0].querySelector('.attr-value'), '777');
+
+  click('#btn-save-char');
+  await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色');
+  await sleep(150);
+
+  const saved = (await savedCharacters()).find((c) => c.name === NAME);
+  check('角色存下来了', !!saved);
+
+  const expect = {
+    tags: ['甲', '乙'],
+    age: '23',
+    gender: '男',
+    race: '龙',
+    description: 'D-描述',
+    personality: 'P-性格',
+    scenario: 'S-场景',
+    firstMes: 'F-开场白',
+    mesExample: 'E-示例',
+    systemPrompt: 'SP-系统提示',
+    postHistoryInstructions: 'PH-后指令',
+    creatorNotes: 'CN-备注'
+  };
+  for (const [key, want] of Object.entries(expect)) {
+    const got = saved ? saved[key] : undefined;
+    check(`字段 ${key} 没被丢掉`, JSON.stringify(got) === JSON.stringify(want), `期望 ${JSON.stringify(want)}，实际 ${JSON.stringify(got)}`);
+  }
+  check(
+    '属性没被丢掉',
+    !!saved && Array.isArray(saved.attributes) && saved.attributes.length === 1 && saved.attributes[0].value === '777',
+    JSON.stringify(saved && saved.attributes)
+  );
+});
+
+// ---------------------------------------------------------------------------
+//  场景 14：角色属性 —— 粘贴文本批量生成
+// ---------------------------------------------------------------------------
+await scenario('角色属性：粘贴文本批量生成', async () => {
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click('#btn-new-char');
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+  setValue('#c-name', '粘贴测试角色');
+
+  check('粘贴区一开始是收着的', !shown('#c-attr-paste'));
+  click('#btn-attr-paste');
+  await waitFor('粘贴区展开', () => shown('#c-attr-paste'));
+
+  // 故意混几种写法 + 两行认不出来的（空行 / 光一个名字 / 保留字）
+  setValue(
+    '#c-attr-paste-text',
+    ['金币：9900', '【上衣】：衬衫', '年龄 16', '- 下装：裙子', '', '体重', '旁白：不该收进来'].join('\n')
+  );
+  click('#btn-attr-paste-apply');
+  await waitFor('属性行出现', () => $$('#c-attr-list .attr-row').length >= 4);
+  await sleep(80);
+
+  const names = $$('#c-attr-list .attr-name').map((n) => n.textContent);
+  const valueOf = (n) => {
+    const row = $$('#c-attr-list .attr-row').find((r) => r.querySelector('.attr-name').textContent === n);
+    return row ? row.querySelector('.attr-value').value : null;
+  };
+
+  check('四种写法都认出来了', ['金币', '上衣', '年龄', '下装'].every((n) => names.includes(n)), JSON.stringify(names));
+  check(
+    '值也对',
+    valueOf('金币') === '9900' && valueOf('上衣') === '衬衫' && valueOf('年龄') === '16' && valueOf('下装') === '裙子',
+    JSON.stringify({ 金币: valueOf('金币'), 上衣: valueOf('上衣'), 年龄: valueOf('年龄'), 下装: valueOf('下装') })
+  );
+  check('认不出的行跳过（光一个名字）', !names.includes('体重'), JSON.stringify(names));
+  check('保留字不收（旁白）', !names.includes('旁白'), JSON.stringify(names));
+  check('解析完自动收起粘贴区', !shown('#c-attr-paste'));
+
+  // 再贴一次：同名的应该覆盖值，而不是加出第二条
+  click('#btn-attr-paste');
+  await waitFor('粘贴区展开', () => shown('#c-attr-paste'));
+  setValue('#c-attr-paste-text', '金币：1\n新字段：值');
+  click('#btn-attr-paste-apply');
+  await waitFor('新字段出现', () => $$('#c-attr-list .attr-name').some((n) => n.textContent === '新字段'));
+  await sleep(80);
+
+  const names2 = $$('#c-attr-list .attr-name').map((n) => n.textContent);
+  check('同名没有加出第二条', names2.filter((n) => n === '金币').length === 1, JSON.stringify(names2));
+  check('同名的值被覆盖了', valueOf('金币') === '1', String(valueOf('金币')));
+  check('新字段加进来了', names2.includes('新字段'), JSON.stringify(names2));
+
+  // 存盘往返（顺带再验一次白名单没漏字段）
+  click('#btn-save-char');
+  await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色');
+  await sleep(150);
+
+  const saved = (await savedCharacters()).find((c) => c.name === '粘贴测试角色');
+  check(
+    '粘贴出来的属性也落盘了',
+    !!saved && saved.attributes.length === 5 && saved.attributes.some((a) => a.name === '金币' && a.value === '1'),
+    JSON.stringify(saved && saved.attributes)
+  );
+});
+
+// ---------------------------------------------------------------------------
+//  准备悬停验证（必须放最后：它会把卡片摆好交给宿主）
 // ---------------------------------------------------------------------------
 let hoverProbe = null;
 await scenario('准备悬停验证', async () => {

@@ -21,6 +21,11 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
+// 关键：用**主进程真正在用的**归一化，而不是自己糊一套。
+// 角色「属性」丢过一次，就是因为假后端只做存取、不做归一化 ——
+// 主进程白名单漏了字段，测试却全绿。现在这段往返走的是同一份代码。
+const { normalizeCharacter } = require('../main/characters.js');
+
 const APP_DIR = path.join(__dirname, '..');
 const OVERALL_TIMEOUT_MS = 90000;
 
@@ -67,7 +72,7 @@ function makeStore() {
 
 const store = makeStore();
 const calls = []; // 记录渲染层请求过的写操作，方便排查
-let lastChatMessages = null; // 最后一次发给模型的完整消息，用来验「注入内容」
+let chatPayloads = []; // 每次发给模型的完整消息（按顺序留着，供宿主侧断言用）
 
 function remember(channel, payload) {
   calls.push(channel);
@@ -108,13 +113,18 @@ function registerStubs() {
   ipcMain.handle('characters:get', () => clone({ characters: store.characters }));
   ipcMain.handle('characters:save', (_event, payload) => {
     remember('characters:save', payload);
-    if (payload && Array.isArray(payload.characters)) store.characters = clone(payload.characters);
+    // 过一遍真正的归一化 —— 白名单漏字段这种事只有跑真代码才测得出来
+    if (payload && Array.isArray(payload.characters)) {
+      store.characters = clone(payload.characters.map((c) => normalizeCharacter(c)));
+    }
     if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
     return { ok: true };
   });
   ipcMain.on('characters:save-sync', (_event, payload) => {
     remember('characters:save-sync', payload);
-    if (payload && Array.isArray(payload.characters)) store.characters = clone(payload.characters);
+    if (payload && Array.isArray(payload.characters)) {
+      store.characters = clone(payload.characters.map((c) => normalizeCharacter(c)));
+    }
     if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
   });
   ipcMain.handle('characters:import', () => ({ canceled: true }));
@@ -133,7 +143,11 @@ function registerStubs() {
   ipcMain.handle('worldbooks:preview', () => ({ section: '' }));
 
   // --- 图片 / 杂项 ---
-  ipcMain.handle('images:pick', () => ({ canceled: true }));
+  // 返回一张真的 1×1 PNG：这样「选背景图」那条链路（解码 → 缩放 → 存 dataURL）
+  // 走的是真代码，而不是被 stub 掉
+  const TINY_PNG =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  ipcMain.handle('images:pick', () => ({ canceled: false, dataUrl: TINY_PNG }));
   ipcMain.handle('util:copy', () => true);
   ipcMain.handle('util:openPath', () => true);
 
@@ -141,7 +155,7 @@ function registerStubs() {
   ipcMain.handle('chat:stop', () => true);
   ipcMain.handle('chat:send', async (event, payload) => {
     remember('chat:send');
-    lastChatMessages = clone((payload && payload.messages) || []);
+    chatPayloads.push(clone((payload && payload.messages) || []));
     const requestId = (payload && payload.requestId) || 'req-smoke';
     const model = (payload && payload.model) || 'test-model';
 
@@ -155,7 +169,9 @@ function registerStubs() {
       ok: true,
       requestId,
       model,
-      content: '冒烟测试回复：我收到了。',
+      // 故意带上两种重点标记：渲染层要把它们变成 <strong> / .msg-em，
+      // 而不是把 ** == 原样显示出来
+      content: '冒烟测试回复：我收到了。**这是加粗**，==这是高亮==。',
       reasoning: '',
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
     };
@@ -284,23 +300,52 @@ async function probeHover(win, result) {
 }
 
 /**
- * 注入内容验证：看**真正发给模型的消息**里有没有状态面板。
+ * 注入内容验证：看**真正发给模型的消息**里有没有该有的东西。
  *
- * 这是唯一能确认「属性真的被注入」的地方 —— 页面上看不出模型收到了什么，
+ * 这是唯一能确认「注入真的生效」的地方 —— 页面上看不出模型收到了什么，
  * 而这条链路（角色卡属性 → 会话面板 → 系统提示词）正是这个功能的全部意义。
+ *
+ * 注意：不看「最后一条」，而是把每次请求都收进来找。
+ * 因为世界里没写开场白时，进世界会立刻多发一次「生成开局」的请求，
+ * 那次是不带状态面板的 —— 只认最后一条会误判。
  */
 function probeInjection(result) {
   if (!result) return;
 
-  const blob = (lastChatMessages || []).map((m) => String((m && m.content) || '')).join('\n');
-  const hasGold = blob.includes('【金币】：100');
-  const hasTop = blob.includes('【上衣】：布衣');
-  const hasPreamble = blob.includes('[当前状态]');
+  const blobs = chatPayloads.map((msgs) => msgs.map((m) => String((m && m.content) || '')).join('\n'));
 
+  const panelOk = blobs.some(
+    (b) => b.includes('[当前状态]') && b.includes('【金币】：100') && b.includes('【上衣】：布衣')
+  );
   result.results.push({
     name: '属性：注入给模型的消息里带上了状态面板',
-    pass: hasGold && hasTop && hasPreamble,
-    detail: `[当前状态]=${hasPreamble} 金币=${hasGold} 上衣=${hasTop}`
+    pass: panelOk,
+    detail: panelOk ? '' : `翻了 ${blobs.length} 次请求都没找到完整面板`
+  });
+
+  const playerOk = blobs.some((b) => b.includes('【玩家角色：改过的名字】'));
+  result.results.push({
+    name: '进入世界：注入的是你选/改过的玩家角色',
+    pass: playerOk,
+    detail: playerOk ? '' : `翻了 ${blobs.length} 次请求都没找到「【玩家角色：改过的名字】」`
+  });
+
+  // 单角色对话：角色卡上的年龄必须真的进提示词（曾经漏了，AI 就把 16 岁写成 21 岁）
+  const ageOk = blobs.some((b) => b.includes('【属性测试角色的基本信息】') && b.includes('年龄 18'));
+  result.results.push({
+    name: '单角色对话：角色的年龄/性别/种族被注入给模型',
+    pass: ageOk,
+    detail: ageOk ? '' : `翻了 ${blobs.length} 次请求都没找到「【属性测试角色的基本信息】…年龄 18」`
+  });
+
+  // 身份四件套也要跟着面板一起注入 —— 世界里这些是会变的
+  const identityOk = blobs.some(
+    (b) => b.includes('【姓名】：改过的名字') && b.includes('【年龄】：18') && b.includes('【种族】：精灵')
+  );
+  result.results.push({
+    name: '进入世界：身份四件套被注入给模型',
+    pass: identityOk,
+    detail: identityOk ? '' : `翻了 ${blobs.length} 次请求都没找齐姓名/年龄/种族`
   });
 }
 

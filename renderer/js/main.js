@@ -22,6 +22,7 @@ import { showToast } from './ui/toast.js';
 import { confirmDialog } from './ui/confirm.js';
 import { applyTheme, toggleTheme } from './ui/theme.js';
 import { esc, renderMarkdown } from './ui/markdown.js';
+import { h, button, card, clear, renderListPage } from './ui/build.js';
 
 import { persistConversations } from './data/persist.js';
 
@@ -357,44 +358,41 @@ const streamPainter = (() => {
 // ---------------------------------------------------------------------------
 
 function renderConvoList() {
-  el.convoList.innerHTML = '';
+  clear(el.convoList);
 
   if (!state.conversations.length) {
-    const empty = document.createElement('div');
-    empty.className = 'convo-title';
+    // 这两条内联样式是「空状态」专属的，没有别的用处（真要认真做该进样式表）
+    const empty = h('div', { class: 'convo-title', text: '（还没有会话）' });
     empty.style.padding = '8px 9px';
     empty.style.color = 'var(--text-faint)';
-    empty.textContent = '（还没有会话）';
     el.convoList.appendChild(empty);
     return;
   }
 
   for (const convo of state.conversations) {
-    const item = document.createElement('div');
-    item.className = `convo-item${convo.id === state.activeId ? ' active' : ''}`;
-    item.setAttribute('role', 'listitem');
+    const label = convo.title || '新对话';
 
-    const title = document.createElement('span');
-    title.className = 'convo-title';
-    title.textContent = convo.title || '新对话';
-    title.title = convo.title || '新对话';
-
-    const del = document.createElement('button');
-    del.className = 'convo-del';
-    del.textContent = '×';
-    del.title = '删除这个会话';
-    del.setAttribute('aria-label', `删除会话：${convo.title || '新对话'}`);
-
-    item.appendChild(title);
-    item.appendChild(del);
-
-    item.addEventListener('click', () => switchConvo(convo.id));
-    del.addEventListener('click', (event) => {
-      event.stopPropagation();
-      removeConvo(convo.id);
-    });
-
-    el.convoList.appendChild(item);
+    el.convoList.appendChild(
+      h(
+        'div',
+        {
+          class: ['convo-item', convo.id === state.activeId && 'active'],
+          role: 'listitem',
+          onclick: () => switchConvo(convo.id)
+        },
+        h('span', { class: 'convo-title', text: label, title: label }),
+        button({
+          class: 'convo-del',
+          text: '×',
+          title: '删除这个会话',
+          ariaLabel: `删除会话：${label}`,
+          onClick: (event) => {
+            event.stopPropagation();
+            removeConvo(convo.id);
+          }
+        })
+      )
+    );
   }
 }
 
@@ -511,8 +509,10 @@ async function applyCharacterChoice(characterId) {
   convo.characterId = next.id;
   convo.updatedAt = now();
 
-  // 角色卡上声明过「属性」就种进状态面板 —— AI 第一轮就知道该维护哪些字段，
-  // 不用等它自己碰巧输出一个「【金币】：100」
+  // 角色卡上声明过「属性」和「身份四项」就种进状态面板 —— AI 第一轮就知道
+  // 这个角色是谁、要维护哪些字段，不用等它自己碰巧输出一个「【金币】：100」
+  // （漏了身份那四项时，模型不知道年龄，会把 16 岁写成 21 岁）
+  seedIdentity(convo, next.name, next);
   seedPanelFromCharacters(convo, [next]);
 
   if (next.firstMes && untouched) {
@@ -1165,12 +1165,29 @@ function isGmMode(convo) {
   return !!(convo && convo.gmMode === true);
 }
 
+/**
+ * 「标重点」的规则。
+ *
+ * 界面上本来就能渲染加粗，但模型不会主动用 —— 结果就是一大段平铺直叙，
+ * 读起来累。所以这里明确告诉它可以用哪两种标记、以及**别用太多**
+ * （全都强调等于没强调）。
+ */
+function emphasisRuleText() {
+  return (
+    `【标重点】\n` +
+    `关键的信息（数值、名字、时间地点、重要决定）用 **加粗**；` +
+    `真正不能错过的（危险、转折、关键线索、承诺）用 ==高亮==（界面上会显示成带颜色的粗体）。\n` +
+    `一篇回复里标一两处就够了 —— 整段都标等于没标。`
+  );
+}
+
 function roleplayRuleText(charName, me) {
   return (
     `【扮演规则】\n` +
     `你现在要扮演「${charName}」。请始终以第一人称，用 ${charName} 的语气、性格和说话习惯回应，` +
     `保持人设前后一致，不要跳出角色，也不要提到自己是 AI、语言模型或助手。` +
-    `把对方称作「${me}」。用动作或神态描写时放在括号里。`
+    `把对方称作「${me}」。用动作或神态描写时放在括号里。\n` +
+    emphasisRuleText()
   );
 }
 
@@ -1186,7 +1203,8 @@ function gmRuleText(charName, me) {
     `把「${me}」当作故事的主角，用第二人称称呼对方。\n` +
     `用第三人称描写环境和 NPC；不同 NPC 要有各自的语气和立场，不要让所有人用同一种腔调说话。\n` +
     `每次回复都要给出具体的情景与可选择的行动方向，让故事能继续推进。\n` +
-    `不要提到自己是 AI、语言模型或助手。`
+    `不要提到自己是 AI、语言模型或助手。\n` +
+    emphasisRuleText()
   );
 }
 
@@ -1196,33 +1214,22 @@ function gmRuleText(charName, me) {
 
 let panelVisible = false; // 面板展开状态（当前会话）
 let panelVisibilityConvoId = null; // 上面这个状态属于哪个会话
-let panelFieldCountSeen = 0; // 上次同步时面板有几个字段
 
 /**
  * 面板展开状态的同步规则：
- *   · 切到别的会话 —— 有面板就展开，没面板就收起
- *   · 同一会话里面板第一次出现（比如第一轮回复才带出状态栏）—— 自动展开一次
- *   · 其余情况一律不动，尊重用户手动收起
+ *   · 切到别的会话 —— **一律默认收起**。面板挺占地方，想看的时候自己点开
+ *     （收起时留着一条细条，随时能点）
+ *   · 同一会话里 —— 什么都不做，尊重用户手动收起/展开
  *
  * 不能每次重绘都按「有没有面板」重算：流式输出期间 renderAll 会被频繁调用，
  * 那样会把用户手动收起的面板又弹开。
  */
 function syncPanelVisibilityForConvo(convo) {
   const id = convo ? convo.id : null;
-  const count = convoPanelFields(convo).length;
+  if (id === panelVisibilityConvoId) return;
 
-  if (id !== panelVisibilityConvoId) {
-    panelVisibilityConvoId = id;
-    panelFieldCountSeen = count;
-    panelVisible = count > 0;
-    return;
-  }
-
-  // 切会话已经处理过；这里只管「面板从无到有」这一个转换
-  if (count > 0 && panelFieldCountSeen === 0) {
-    panelVisible = true;
-  }
-  panelFieldCountSeen = count;
+  panelVisibilityConvoId = id;
+  panelVisible = false;
 }
 
 function currentPanelTextarea() {
@@ -1254,16 +1261,16 @@ function renderPanel() {
   const fields = convo ? convoPanelFields(convo) : [];
   const hasPanel = fields.length > 0;
 
-  el.btnPanelToggle.classList.toggle('hidden', !hasPanel);
-  el.panelBox.classList.toggle('hidden', !hasPanel || !panelVisible);
+  // 收起后不整块藏起来，只留标题那一条 —— 否则「能点开」这件事就没人看得见了
+  el.panelBox.classList.toggle('hidden', !hasPanel);
+  el.panelBox.classList.toggle('collapsed', !panelVisible);
 
   if (!hasPanel) {
     el.panelFields.innerHTML = '';
-    el.btnPanelToggle.setAttribute('aria-expanded', 'false');
     return;
   }
 
-  el.btnPanelToggle.setAttribute('aria-expanded', panelVisible ? 'true' : 'false');
+  el.btnPanelCollapse.setAttribute('aria-expanded', panelVisible ? 'true' : 'false');
 
   const panel = convoPanel(convo);
   const filled = fields.filter((n) => String(panel[n] || '').trim()).length;
@@ -1273,35 +1280,33 @@ function renderPanel() {
   const editing = currentPanelTextarea();
   if (editing && el.panelFields.querySelector(`[data-field="${CSS.escape(editing.name)}"]`)) return;
 
-  el.panelFields.innerHTML = '';
+  clear(el.panelFields);
 
   for (const name of fields) {
-    const row = document.createElement('div');
-    row.className = 'panel-row';
-
-    const label = document.createElement('span');
-    label.className = 'panel-name';
-    label.textContent = name;
-    label.title = name;
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'panel-value';
-    input.dataset.field = name;
-    input.value = panel[name] || '';
-    input.spellcheck = false;
-    input.setAttribute('aria-label', name);
+    const input = h('input', {
+      type: 'text',
+      class: 'panel-value',
+      dataset: { field: name },
+      value: panel[name] || '',
+      spellcheck: 'false',
+      'aria-label': name
+    });
     attachPanelEditor(convo, name, input);
 
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'panel-del';
-    del.title = '从面板里移除这个字段';
-    del.textContent = '✕';
-    del.addEventListener('click', () => removePanelField(convo, name));
-
-    row.append(label, input, del);
-    el.panelFields.appendChild(row);
+    el.panelFields.appendChild(
+      h(
+        'div',
+        { class: 'panel-row' },
+        h('span', { class: 'panel-name', text: name, title: name }),
+        input,
+        button({
+          class: 'panel-del',
+          text: '✕',
+          title: '从面板里移除这个字段',
+          onClick: () => removePanelField(convo, name)
+        })
+      )
+    );
   }
 }
 
@@ -1328,8 +1333,6 @@ function resetPanel() {
   convo.panel = {};
   convo.panelFields = [];
   convo.updatedAt = now();
-  // 让「面板从无到有」的判定立刻成立：下次再出现状态栏时会自动展开
-  panelFieldCountSeen = 0;
   renderAll();
   persistConversations(0);
   showToast('面板已清空，下一条带状态栏的回复会重新建立');
@@ -1969,6 +1972,167 @@ async function clearAllSummaries() {
 }
 
 // ---------------------------------------------------------------------------
+//  对话窗口外观（字号 / 加粗颜色 / 背景图）
+//
+//  这三样只影响「怎么显示」，一个字都不会进提示词。
+//  实现上都是往 <html> 上写 CSS 变量，样式表里用 var() 取 ——
+//  这样换主题、换背景都不用重写一套规则。
+// ---------------------------------------------------------------------------
+
+const CHAT_FONT_MIN = 12;
+const CHAT_FONT_MAX = 22;
+const CHAT_FONT_DEFAULT = 14;
+// 没设自定义颜色时，色盘控件显示的主题色（只是给色盘一个初始值，不是生效值）
+const BOLD_COLOR_FALLBACK = '#409eff';
+
+/** 把当前设置里的外观写到 CSS 变量上（值空就删掉变量，退回样式表里的默认） */
+function applyChatAppearance() {
+  const s = state.settings || {};
+  const root = document.documentElement;
+
+  const size = Number(s.chatFontSize);
+  const px = Number.isFinite(size) && size >= CHAT_FONT_MIN && size <= CHAT_FONT_MAX ? size : CHAT_FONT_DEFAULT;
+  root.style.setProperty('--chat-font-size', `${px}px`);
+
+  if (s.chatBoldColor) root.style.setProperty('--chat-bold-color', s.chatBoldColor);
+  else root.style.removeProperty('--chat-bold-color');
+
+  // dataURL 里不会出现引号，包一层更保险
+  if (s.chatBackground) root.style.setProperty('--chat-bg-image', `url("${s.chatBackground}")`);
+  else root.style.removeProperty('--chat-bg-image');
+}
+
+/** 滑块的「已选比例」是 CSS 渐变画的，所以值一变就得把 --range-fill 同步过去 */
+function syncRangeFill() {
+  const input = el.appearanceFontSize;
+  if (!input) return;
+
+  const min = Number(input.min) || 0;
+  const max = Number(input.max) || 100;
+  const value = Number(input.value);
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  input.style.setProperty('--range-fill', `${pct}%`);
+}
+
+/** 外观面板里各控件的当前值（从内存里的设置读，不读 DOM —— 打开时要用它回填） */
+function renderAppearanceForm() {
+  const s = state.settings || {};
+
+  const size = Number(s.chatFontSize);
+  const px = Number.isFinite(size) && size >= CHAT_FONT_MIN && size <= CHAT_FONT_MAX ? Math.round(size) : CHAT_FONT_DEFAULT;
+  el.appearanceFontSize.value = String(px);
+  el.appearanceFontSizeValue.textContent = `${px}px`;
+  syncRangeFill();
+
+  el.appearanceBoldColorText.value = s.chatBoldColor || '';
+  el.appearanceBoldColor.value = s.chatBoldColor || BOLD_COLOR_FALLBACK;
+
+  const bg = s.chatBackground || '';
+  el.appearanceBgPreview.innerHTML = '';
+  if (bg) {
+    const img = document.createElement('img');
+    img.src = bg;
+    img.alt = '';
+    el.appearanceBgPreview.appendChild(img);
+  }
+  el.appearanceBgPreview.classList.toggle('hidden', !bg);
+  el.btnClearBg.disabled = !bg;
+}
+
+/** 改一项外观：立刻生效 + 落盘 */
+async function persistAppearance(patch) {
+  state.settings = { ...(state.settings || {}), ...patch };
+  applyChatAppearance();
+  renderAppearanceForm();
+
+  try {
+    // 主进程会把不合法/超限的值洗掉，所以用它的返回值覆盖本地
+    state.settings = await api.saveSettings(patch);
+  } catch (err) {
+    console.error('保存外观设置失败', err);
+    showToast('外观没能保存到磁盘', 'error');
+    return;
+  }
+  applyChatAppearance();
+  renderAppearanceForm();
+}
+
+/**
+ * 背景图先压到最长边 1920 再存。
+ * 头像那套是「居中裁成正方形」，背景不能裁 —— 裁了就变形，所以只等比缩。
+ */
+function shrinkBackground(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+
+    img.onload = () => {
+      try {
+        const max = 1920;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+
+        // 背景图不需要透明，webp 有透明通道也不亏；压到 0.82 体积和观感比较平衡
+        const out = canvas.toDataURL('image/webp', 0.82);
+        resolve(out.startsWith('data:image/') ? out : dataUrl);
+      } catch (err) {
+        resolve(dataUrl);
+      }
+    };
+
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+async function pickChatBackground() {
+  let result;
+  try {
+    result = await api.pickImage();
+  } catch (err) {
+    showToast((err && err.message) || '选择图片失败', 'error');
+    return;
+  }
+
+  if (!result || result.canceled) return;
+  if (!result.dataUrl) {
+    showToast(result.error || '这张图片用不了', 'error');
+    return;
+  }
+
+  showToast('正在压缩背景图…');
+  const shrunk = await shrinkBackground(result.dataUrl);
+  await persistAppearance({ chatBackground: shrunk });
+  showToast('背景图已换上', 'ok');
+}
+
+/**
+ * 文本框里可能是 #abc / #aabbcc / #aabbccdd，也可能带不带 #。
+ * 认不出来就返回 null（调用方提示一下，不要静默丢掉）。
+ */
+function normalizeHexColor(text) {
+  let t = String(text || '').trim();
+  if (!t) return '';
+  if (!t.startsWith('#')) t = `#${t}`;
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(t) ? t.toLowerCase() : null;
+}
+
+function openAppearanceModal() {
+  renderAppearanceForm();
+  el.appearanceModal.classList.remove('hidden');
+}
+
+function closeAppearanceModal() {
+  el.appearanceModal.classList.add('hidden');
+  el.input.focus();
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -2023,6 +2187,15 @@ function buildApiMessages(convo, worldbookSection) {
   if (String(base).trim()) parts.push(applyMacros(base, character, me).trim());
 
   if (character) {
+    // 身份：年龄/性别/种族是「这个人是谁」的一部分，一开始就得说清楚。
+    // 光靠状态面板不够 —— 面板可能被重置、老会话也没有这些字段，
+    // 模型不知道就只能自己编（实测：16 岁的角色被回复成 21 岁）。
+    const identity = [];
+    if (character.age) identity.push(`年龄 ${character.age}`);
+    if (character.gender) identity.push(`性别 ${character.gender}`);
+    if (character.race) identity.push(`种族 ${character.race}`);
+    if (identity.length) parts.push(`【${charName}的基本信息】\n${identity.join('，')}`);
+
     if (character.description) parts.push(`【${charName}的设定】\n${applyMacros(character.description, character, me)}`);
     if (character.personality) parts.push(`【${charName}的性格】\n${applyMacros(character.personality, character, me)}`);
     if (character.scenario) parts.push(`【当前场景】\n${applyMacros(character.scenario, character, me)}`);
@@ -2247,6 +2420,8 @@ async function requestCompletion(convo) {
     // 回复写完了，从里面抽出状态栏存到会话上 —— 下一轮由程序权威注入，
     // 不再依赖模型去抄历史（历史会被 maxTurns 截断）。
     syncConvoPanel(convo);
+    // 剧情要是把你的名字改了，消息标签和 {{user}} 也得跟着改
+    syncPlayerNameFromPanel(convo);
     renderAll({ forceScroll: true });
     persistConversations();
     el.input.focus();
@@ -2628,47 +2803,31 @@ function renderEntryList() {
 
   const entries = book.entries || [];
   if (!entries.length) {
-    const tip = document.createElement('div');
-    tip.className = 'wb-list-empty';
-    tip.textContent = '这本书还没有条目，点「＋ 条目」加一条';
-    el.wb.entryList.appendChild(tip);
+    el.wb.entryList.appendChild(
+      h('div', { class: 'wb-list-empty', text: '这本书还没有条目，点「＋ 条目」加一条' })
+    );
     return;
   }
 
   for (const entry of entries) {
-    const item = document.createElement('div');
-    item.className = `wb-entry${entry.id === editingEntryId ? ' active' : ''}${
-      entry.enabled === false ? ' disabled' : ''
-    }`;
-    item.title = entry.title;
-    item.addEventListener('click', () => selectEntry(entry.id));
-
-    const title = document.createElement('div');
-    title.className = 'wb-entry-title';
-
-    const label = document.createElement('span');
-    label.textContent = entry.title;
-    title.appendChild(label);
-
-    if (entry.constant) {
-      const badge = document.createElement('span');
-      badge.className = 'wb-badge';
-      badge.textContent = '常驻';
-      title.appendChild(badge);
-    }
-    if (entry.enabled === false) {
-      const badge = document.createElement('span');
-      badge.className = 'wb-badge';
-      badge.textContent = '停用';
-      title.appendChild(badge);
-    }
-
-    const keys = document.createElement('div');
-    keys.className = 'wb-entry-keys';
-    keys.textContent = (entry.keys || []).join(' / ') || '（无关键词）';
-
-    item.append(title, keys);
-    el.wb.entryList.appendChild(item);
+    el.wb.entryList.appendChild(
+      h(
+        'div',
+        {
+          class: ['wb-entry', entry.id === editingEntryId && 'active', entry.enabled === false && 'disabled'],
+          title: entry.title,
+          onclick: () => selectEntry(entry.id)
+        },
+        h(
+          'div',
+          { class: 'wb-entry-title' },
+          h('span', { text: entry.title }),
+          entry.constant && h('span', { class: 'wb-badge', text: '常驻' }),
+          entry.enabled === false && h('span', { class: 'wb-badge', text: '停用' })
+        ),
+        h('div', { class: 'wb-entry-keys', text: (entry.keys || []).join(' / ') || '（无关键词）' })
+      )
+    );
   }
 }
 
@@ -2754,47 +2913,36 @@ function newWorldbookCharId() {
 function renderWorldbookChars() {
   const host = el.wb.charList;
   if (!host) return;
-  host.innerHTML = '';
+  clear(host);
 
   const book = currentWorldbook();
   if (!book) return;
 
   for (const c of worldbookCharacters(book)) {
-    const chip = document.createElement('div');
-    chip.className = 'wb-char-chip';
-    chip.title = c.name;
-
-    const av = document.createElement('div');
-    av.className = 'wb-char-chip-avatar';
-    if (c.avatar) {
-      const img = document.createElement('img');
-      img.src = c.avatar;
-      img.alt = '';
-      av.appendChild(img);
-    } else {
-      av.textContent = c.name.slice(0, 1);
-    }
-
-    const name = document.createElement('span');
-    name.className = 'wb-char-chip-name';
-    name.textContent = c.name;
-
-    const btnEdit = document.createElement('button');
-    btnEdit.type = 'button';
-    btnEdit.className = 'wb-char-chip-btn';
-    btnEdit.textContent = '编辑';
-    btnEdit.title = '编辑这个副本的设定';
-    btnEdit.addEventListener('click', () => editWorldbookCharacter(c.id));
-
-    const btnDel = document.createElement('button');
-    btnDel.type = 'button';
-    btnDel.className = 'wb-char-chip-btn';
-    btnDel.textContent = '移除';
-    btnDel.title = '从本书移除（角色库里的不受影响）';
-    btnDel.addEventListener('click', () => removeWorldbookCharacter(c.id));
-
-    chip.append(av, name, btnEdit, btnDel);
-    host.appendChild(chip);
+    host.appendChild(
+      h(
+        'div',
+        { class: 'wb-char-chip', title: c.name },
+        h(
+          'div',
+          { class: 'wb-char-chip-avatar' },
+          c.avatar ? h('img', { src: c.avatar, alt: '' }) : c.name.slice(0, 1)
+        ),
+        h('span', { class: 'wb-char-chip-name', text: c.name }),
+        button({
+          class: 'wb-char-chip-btn',
+          text: '编辑',
+          title: '编辑这个副本的设定',
+          onClick: () => editWorldbookCharacter(c.id)
+        }),
+        button({
+          class: 'wb-char-chip-btn',
+          text: '移除',
+          title: '从本书移除（角色库里的不受影响）',
+          onClick: () => removeWorldbookCharacter(c.id)
+        })
+      )
+    );
   }
 }
 
@@ -3289,6 +3437,10 @@ function bindEvents() {
     el.c.attrNew.value = '';
   });
 
+  // 批量粘贴：一行一项，省得一条条手打
+  el.c.btnAttrPaste.addEventListener('click', () => toggleAttrPaste());
+  el.c.btnAttrPasteApply.addEventListener('click', applyAttrPaste);
+
   el.btnDelChar.addEventListener('click', deleteCharacter);
   el.btnImportCard.addEventListener('click', importCards);
 
@@ -3297,8 +3449,12 @@ function bindEvents() {
   el.btnClearAvatar.addEventListener('click', clearAvatar);
 
   // 状态面板
-  el.btnPanelToggle.addEventListener('click', togglePanel);
-  el.btnPanelClose.addEventListener('click', togglePanel);
+  el.btnPanelCollapse.addEventListener('click', togglePanel);
+  // 整条标题栏都能点（「重置」那种按钮除外，它们自己处理点击）
+  el.panelHead.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return;
+    togglePanel();
+  });
   el.btnPanelReset.addEventListener('click', resetPanel);
 
   // 记忆管理
@@ -3315,6 +3471,44 @@ function bindEvents() {
   el.btnPerspective.addEventListener('click', openPerspectiveModal);
   el.btnClosePerspective.addEventListener('click', closePerspectiveModal);
   el.btnClosePerspective2.addEventListener('click', closePerspectiveModal);
+
+  // 对话窗口外观：改完立即生效 + 落盘，所以没有「保存」按钮
+  el.btnAppearance.addEventListener('click', openAppearanceModal);
+  el.btnCloseAppearance.addEventListener('click', closeAppearanceModal);
+  el.btnCloseAppearance2.addEventListener('click', closeAppearanceModal);
+  el.appearanceModal.addEventListener('click', (event) => {
+    if (event.target === el.appearanceModal) closeAppearanceModal();
+  });
+
+  // 字号：拖动时实时预览，松手才落盘 —— 不然拖一次要写几十遍配置文件
+  el.appearanceFontSize.addEventListener('input', () => {
+    const px = Number(el.appearanceFontSize.value);
+    el.appearanceFontSizeValue.textContent = `${px}px`;
+    syncRangeFill();
+    state.settings = { ...(state.settings || {}), chatFontSize: px };
+    applyChatAppearance();
+  });
+  el.appearanceFontSize.addEventListener('change', () => {
+    persistAppearance({ chatFontSize: Number(el.appearanceFontSize.value) });
+  });
+
+  // 加粗颜色：色盘选的直接生效；手填的等回车/失焦再认
+  el.appearanceBoldColor.addEventListener('input', () => {
+    persistAppearance({ chatBoldColor: el.appearanceBoldColor.value });
+  });
+  el.appearanceBoldColorText.addEventListener('change', () => {
+    const hex = normalizeHexColor(el.appearanceBoldColorText.value);
+    if (hex === null) {
+      showToast('颜色要写成 #rgb 或 #rrggbb，比如 #e06c75', 'error');
+      renderAppearanceForm();
+      return;
+    }
+    persistAppearance({ chatBoldColor: hex });
+  });
+  el.btnBoldColorReset.addEventListener('click', () => persistAppearance({ chatBoldColor: '' }));
+
+  el.btnPickBg.addEventListener('click', pickChatBackground);
+  el.btnClearBg.addEventListener('click', () => persistAppearance({ chatBackground: '' }));
   el.pNarration.addEventListener('change', applyPerspectiveFromForm);
   el.pGm.addEventListener('change', applyPerspectiveFromForm);
   el.perspectiveModal.addEventListener('click', (event) => {
@@ -3348,6 +3542,7 @@ function bindEvents() {
   el.btnClosePlayer.addEventListener('click', closePlayerModal);
   el.btnCancelPlayer.addEventListener('click', closePlayerModal);
   el.btnStartPlay.addEventListener('click', startWorldPlay);
+  el.playerChar.addEventListener('change', applyPlayerCharChoice);
   el.playerModal.addEventListener('click', (event) => {
     if (event.target === el.playerModal) closePlayerModal();
   });
@@ -3446,6 +3641,10 @@ function bindEvents() {
     }
     if (!el.modal.classList.contains('hidden')) {
       closeSettings();
+      return;
+    }
+    if (!el.appearanceModal.classList.contains('hidden')) {
+      closeAppearanceModal();
     }
   });
 
@@ -3636,20 +3835,17 @@ function showView(name) {
 // ---------------------------------------------------------------------------
 
 function renderWorldbookPage() {
-  const grid = el.wbPageGrid;
-  if (!grid) return;
-  grid.innerHTML = '';
-
   const list = worldbooks();
-  el.wbPageEmpty.classList.toggle('hidden', !!list.length);
-
-  if (el.wbPageSub) {
-    el.wbPageSub.textContent = list.length
+  renderListPage({
+    grid: el.wbPageGrid,
+    empty: el.wbPageEmpty,
+    sub: el.wbPageSub,
+    subText: list.length
       ? `共 ${list.length} 个世界 · 点「游玩」进入，进去前先创建你自己的角色`
-      : '导入酒馆的 lorebook，或自己写一个世界';
-  }
-
-  for (const book of list) grid.appendChild(worldbookCard(book));
+      : '导入酒馆的 lorebook，或自己写一个世界',
+    items: list,
+    card: worldbookCard
+  });
 }
 
 /**
@@ -3661,44 +3857,18 @@ function renderWorldbookPage() {
  * 角色卡可以快捷删，是因为单张角色卡的信息量小、重建成本低。
  */
 function worldbookCard(book) {
-  const card = document.createElement('div');
-  card.className = 'char-card';
-  card.setAttribute('role', 'listitem');
-  card.title = book.name;
-
-  const av = document.createElement('div');
-  av.className = 'char-card-avatar worldbook-avatar';
-  av.textContent = '世';
-
-  const name = document.createElement('div');
-  name.className = 'char-card-name';
-  name.textContent = book.name;
-
   const charCount = worldbookCharacters(book).length;
-  const sub = document.createElement('div');
-  sub.className = 'char-card-sub';
-  sub.textContent = charCount
-    ? `${book.entries.length} 条设定 · ${charCount} 个角色`
-    : `${book.entries.length} 条设定`;
 
-  const actions = document.createElement('div');
-  actions.className = 'char-card-actions';
-
-  const btnEdit = document.createElement('button');
-  btnEdit.type = 'button';
-  btnEdit.className = 'btn btn-ghost btn-sm';
-  btnEdit.textContent = '编辑';
-  btnEdit.addEventListener('click', () => editWorldbookFromPage(book.id));
-
-  const btnPlay = document.createElement('button');
-  btnPlay.type = 'button';
-  btnPlay.className = 'btn btn-primary btn-sm';
-  btnPlay.textContent = '游玩';
-  btnPlay.addEventListener('click', () => openPlayerModal(book.id));
-
-  actions.append(btnEdit, btnPlay);
-  card.append(av, name, sub, actions);
-  return card;
+  return card({
+    title: book.name,
+    sub: charCount ? `${book.entries.length} 条设定 · ${charCount} 个角色` : `${book.entries.length} 条设定`,
+    avatarText: '世',
+    avatarClass: 'worldbook-avatar',
+    actions: [
+      button({ class: 'btn btn-ghost btn-sm', text: '编辑', onClick: () => editWorldbookFromPage(book.id) }),
+      button({ class: 'btn btn-primary btn-sm', text: '游玩', onClick: () => openPlayerModal(book.id) })
+    ]
+  });
 }
 
 /** 点「编辑」：打开世界书编辑器（它现在只编辑这一本） */
@@ -3715,6 +3885,94 @@ function editWorldbookFromPage(id) {
 
 let playingBookId = null;
 
+/**
+ * 把角色卡拼成「玩家角色」的设定文本。
+ * 主角是 GM 要伺候的对象，所以描述和性格都要给到，不然它只知道一个名字。
+ */
+function playerProfileFromCharacter(character) {
+  if (!character) return '';
+  const bits = [];
+  const desc = String(character.description || '').trim();
+  const personality = String(character.personality || '').trim();
+  const scenario = String(character.scenario || '').trim();
+  if (desc) bits.push(desc);
+  if (personality) bits.push(`【性格】${personality}`);
+  if (scenario) bits.push(`【背景】${scenario}`);
+  return bits.join('\n');
+}
+
+/** 下拉框下面那行预览：让「会被带进世界的是什么」一眼可见 */
+function updatePlayerCharPreview() {
+  const host = el.playerCharPreview;
+  if (!host) return;
+
+  const character = characterById(el.playerChar.value);
+  if (!character) {
+    host.innerHTML = '';
+    host.classList.add('hidden');
+    return;
+  }
+
+  const attrs = characterAttrs(character);
+
+  host.innerHTML = '';
+  if (character.avatar) {
+    const img = document.createElement('img');
+    img.src = character.avatar;
+    img.alt = '';
+    host.appendChild(img);
+  }
+
+  const text = document.createElement('span');
+  text.textContent = attrs.length
+    ? `会带上 ${attrs.length} 个属性：${attrs.map((a) => a.name).join('、')}`
+    : '这张卡没有定义属性，只会带上名字和设定';
+  host.appendChild(text);
+
+  host.classList.remove('hidden');
+}
+
+/** 把「用角色卡当自己」的下拉填好（角色库为空时整块隐藏） */
+function renderPlayerCharOptions() {
+  if (!el.playerCharField) return;
+
+  const list = characters();
+  el.playerCharField.classList.toggle('hidden', !list.length);
+
+  el.playerChar.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = list.length ? '（自己写一个）' : '角色库还是空的';
+  el.playerChar.appendChild(none);
+
+  for (const c of list) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    el.playerChar.appendChild(opt);
+  }
+
+  el.playerChar.value = '';
+  updatePlayerCharPreview();
+}
+
+/**
+ * 选了一张角色卡：把名字和设定填到下面的输入框里。
+ * 注意是「填」不是「锁」—— 填完还能改，改了就以你改的为准。
+ */
+function applyPlayerCharChoice() {
+  const character = characterById(el.playerChar.value);
+  if (character) {
+    el.playerName.value = character.name;
+    el.playerProfile.value = playerProfileFromCharacter(character);
+  } else {
+    // 选回「自己写一个」：把名字还原成设置里的默认值，设定清空
+    el.playerName.value = (state.settings && state.settings.userName) || '';
+    el.playerProfile.value = '';
+  }
+  updatePlayerCharPreview();
+}
+
 function openPlayerModal(bookId) {
   const book = worldbookById(bookId);
   if (!book) return;
@@ -3725,7 +3983,9 @@ function openPlayerModal(bookId) {
   if (el.playerSub) {
     el.playerSub.textContent = '先给这个世界里的自己一个身份，然后就可以开始了';
   }
-  // 名字预填设置里的「你的名字」，省得每次重打
+
+  // 每次打开都重列一遍角色库（可能刚加过新角色），并回到「自己写一个」
+  renderPlayerCharOptions();
   el.playerName.value = (state.settings && state.settings.userName) || '';
   el.playerProfile.value = '';
 
@@ -3758,13 +4018,19 @@ function startWorldPlay() {
 
   const convo = createConvo(true);
   convo.worldbookIds = [book.id];
-  convo.player = { name, profile };
   convo.gmMode = true;
   convo.title = book.name;
   convo.updatedAt = now();
 
-  // 本书角色卡上声明的属性一起种进面板（同名以先出现的为准）。
-  // 世界模式里玩家角色只有名字+简介，没有角色卡，所以属性只能来自书里的角色。
+  // 你在这个世界里的身份。选了角色卡就记住是哪张（名字/设定仍以输入框为准，
+  // 因为选完还能改）。
+  const pickedCard = characterById(el.playerChar.value);
+  convo.player = { name, profile, characterId: pickedCard ? pickedCard.id : null };
+
+  // 状态面板：先种「你自己」的身份和属性（主角的数值优先），再种本书角色的。
+  // 同名以先出现的为准，所以自己卡上的「金币」不会被书里的盖掉。
+  seedIdentity(convo, name, pickedCard);
+  if (pickedCard) seedPanelFromCharacters(convo, [pickedCard]);
   seedPanelFromCharacters(convo, worldbookCharacters(book));
 
   // 开场：书里写了就用书里的；没写就让模型按设定现生成一段
@@ -3915,11 +4181,14 @@ function worldbookCast(convo) {
   let total = 0;
 
   for (const c of cast) {
+    // 身份用括号缀在名字后面：GM 不知道 NPC 几岁、什么族，照样会瞎编
+    const who = [c.age && `${c.age}岁`, c.gender, c.race].filter(Boolean).join('·');
     const bits = [c.description, c.personality]
       .map((s) => String(s || '').trim().replace(/\s+/g, ' '))
       .filter(Boolean)
       .join(' ');
-    const line = `- ${c.name}：${bits.slice(0, MAX_CAST_PER_NPC) || '（没写设定）'}`;
+    const head = who ? `${c.name}（${who}）` : c.name;
+    const line = `- ${head}：${bits.slice(0, MAX_CAST_PER_NPC) || '（没写设定）'}`;
 
     if (total + line.length > MAX_CAST_CHARS) {
       lines.push(`- （还有 ${cast.length - lines.length} 人没列出）`);
@@ -3939,86 +4208,51 @@ function worldbookCast(convo) {
 // ---------------------------------------------------------------------------
 
 function renderCharacterPage() {
-  const grid = el.charPageGrid;
-  if (!grid) return;
-  grid.innerHTML = '';
-
   const list = characters();
-  el.charPageEmpty.classList.toggle('hidden', !!list.length);
-
-  if (el.charsPageSub) {
-    el.charsPageSub.textContent = list.length
+  renderListPage({
+    grid: el.charPageGrid,
+    empty: el.charPageEmpty,
+    sub: el.charsPageSub,
+    subText: list.length
       ? `共 ${list.length} 个角色 · 点「聊天」直接开一个新会话`
-      : '导入酒馆角色卡，或自己写一个';
-  }
-
-  for (const c of list) grid.appendChild(characterCard(c));
+      : '导入酒馆角色卡，或自己写一个',
+    items: list,
+    card: characterCard
+  });
 }
 
 /** 一张角色卡：头像 + 名字 + 来源 + 编辑/聊天，右上角悬停浮出删除 */
 function characterCard(c) {
-  const card = document.createElement('div');
-  card.className = 'char-card';
-  card.setAttribute('role', 'listitem');
-  card.title = c.name;
-
-  // 删除：静止时是透明的，鼠标移上来才浮出来 —— 跟左侧会话列表的 × 同一套。
-  // 这样卡片平时还是干净的「编辑 / 聊天」两个按钮，不至于误点。
-  const btnDel = document.createElement('button');
-  btnDel.type = 'button';
-  btnDel.className = 'char-card-del';
-  btnDel.textContent = '×';
-  btnDel.title = '删除这个角色';
-  btnDel.setAttribute('aria-label', `删除角色：${c.name}`);
-  btnDel.addEventListener('click', (event) => {
-    event.stopPropagation();
-    deleteCharacterById(c.id, 'library');
-  });
-
-  const av = document.createElement('div');
-  av.className = 'char-card-avatar';
-  if (c.avatar) {
-    const img = document.createElement('img');
-    img.src = c.avatar;
-    img.alt = '';
-    av.appendChild(img);
-  } else {
-    av.textContent = c.name.slice(0, 1);
-  }
-
-  const name = document.createElement('div');
-  name.className = 'char-card-name';
-  name.textContent = c.name;
-
-  const sub = document.createElement('div');
-  sub.className = 'char-card-sub';
   // 来源 + 分类标签挤在同一行：卡片高度不变，标签也不会把卡片撑得参差不齐。
   // 标签是「这张卡属于什么类型」（作品/风格/用途），只显示前几个，多了省略。
   const subBits = [c.source === 'png' ? '酒馆角色卡' : c.source === 'json' ? 'JSON 角色卡' : '手写'];
   for (const tag of (Array.isArray(c.tags) ? c.tags : []).slice(0, 3)) {
     if (String(tag).trim()) subBits.push(String(tag).trim());
   }
-  sub.textContent = subBits.join(' · ');
-  sub.title = subBits.join(' · ');
+  const subText = subBits.join(' · ');
 
-  const actions = document.createElement('div');
-  actions.className = 'char-card-actions';
-
-  const btnEdit = document.createElement('button');
-  btnEdit.type = 'button';
-  btnEdit.className = 'btn btn-ghost btn-sm';
-  btnEdit.textContent = '编辑';
-  btnEdit.addEventListener('click', () => editCharacterFromPage(c.id));
-
-  const btnChat = document.createElement('button');
-  btnChat.type = 'button';
-  btnChat.className = 'btn btn-primary btn-sm';
-  btnChat.textContent = '聊天';
-  btnChat.addEventListener('click', () => chatWithCharacter(c.id));
-
-  actions.append(btnEdit, btnChat);
-  card.append(btnDel, av, name, sub, actions);
-  return card;
+  return card({
+    title: c.name,
+    sub: subText,
+    avatar: c.avatar,
+    avatarText: c.name.slice(0, 1),
+    // 删除：静止时是透明的，鼠标移上来才浮出来 —— 跟左侧会话列表的 × 同一套。
+    // 这样卡片平时还是干净的「编辑 / 聊天」两个按钮，不至于误点。
+    extra: button({
+      class: 'char-card-del',
+      text: '×',
+      title: '删除这个角色',
+      ariaLabel: `删除角色：${c.name}`,
+      onClick: (event) => {
+        event.stopPropagation();
+        deleteCharacterById(c.id, 'library');
+      }
+    }),
+    actions: [
+      button({ class: 'btn btn-ghost btn-sm', text: '编辑', onClick: () => editCharacterFromPage(c.id) }),
+      button({ class: 'btn btn-primary btn-sm', text: '聊天', onClick: () => chatWithCharacter(c.id) })
+    ]
+  });
 }
 
 /** 点「编辑」：用编辑弹窗打开这个角色（弹窗现在只是表单） */
@@ -4150,6 +4384,9 @@ function fillCharForm(character) {
   el.c.system.value = character.systemPrompt || '';
   el.c.post.value = character.postHistoryInstructions || '';
   el.c.notes.value = character.creatorNotes || '';
+  el.c.age.value = character.age || '';
+  el.c.gender.value = GENDERS.includes(character.gender) ? character.gender : '';
+  el.c.race.value = character.race || '';
 
   charDraftAvatar = character.avatar || '';
   renderCharAvatar();
@@ -4177,6 +4414,9 @@ function fillCharForm(character) {
 // 编辑器打开期间的属性草稿，点「保存角色」才写回角色卡（和 charDraftAvatar 一个套路）
 let charAttrs = [];
 
+// 性别是选择框，只认这几个值（导入的卡会在主进程先归一化过来）
+const GENDERS = ['男', '女', '其他'];
+
 /** 读角色卡上的属性（容错老数据 / 导入的角色卡） */
 function characterAttrs(character) {
   if (!character || !Array.isArray(character.attributes)) return [];
@@ -4195,52 +4435,150 @@ function renderCharAttrs() {
   // 快捷候选词：已经在属性里的就不再显示，免得点了个寂寞
   const used = new Set(charAttrs.map((a) => a.name));
   const quick = (state.settings && state.settings.commonAttributes) || [];
-  el.c.attrQuick.innerHTML = '';
+  clear(el.c.attrQuick);
   for (const name of quick) {
     if (used.has(name)) continue;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'attr-quick-btn';
-    btn.textContent = `＋ ${name}`;
-    btn.addEventListener('click', () => addCharAttr(name));
-    el.c.attrQuick.appendChild(btn);
+    el.c.attrQuick.appendChild(
+      button({ class: 'attr-quick-btn', text: `＋ ${name}`, onClick: () => addCharAttr(name) })
+    );
   }
   el.c.attrQuick.classList.toggle('hidden', !el.c.attrQuick.childElementCount);
 
   // 已加的属性：名字 + 初始值输入框 + 移除。
   // 输入框里改值只更新草稿，不重画 —— 一重画光标就跳走了。
-  el.c.attrList.innerHTML = '';
+  clear(el.c.attrList);
   charAttrs.forEach((attr, index) => {
-    const row = document.createElement('div');
-    row.className = 'attr-row';
-
-    const name = document.createElement('span');
-    name.className = 'attr-name';
-    name.textContent = attr.name;
-    name.title = attr.name;
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'attr-value';
-    input.value = attr.value;
-    input.spellcheck = false;
-    input.placeholder = '初始值（可以留空）';
-    input.setAttribute('aria-label', `${attr.name} 的初始值`);
-    input.addEventListener('input', () => { attr.value = input.value; });
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'panel-del';
-    del.textContent = '✕';
-    del.title = '删掉这个属性';
-    del.addEventListener('click', () => {
-      charAttrs.splice(index, 1);
-      renderCharAttrs();
+    const input = h('input', {
+      type: 'text',
+      class: 'attr-value',
+      value: attr.value,
+      spellcheck: 'false',
+      placeholder: '初始值（可以留空）',
+      'aria-label': `${attr.name} 的初始值`,
+      oninput: () => { attr.value = input.value; }
     });
 
-    row.append(name, input, del);
-    el.c.attrList.appendChild(row);
+    el.c.attrList.appendChild(
+      h(
+        'div',
+        { class: 'attr-row' },
+        h('span', { class: 'attr-name', text: attr.name, title: attr.name }),
+        input,
+        button({
+          class: 'panel-del',
+          text: '✕',
+          title: '删掉这个属性',
+          onClick: () => {
+            charAttrs.splice(index, 1);
+            renderCharAttrs();
+          }
+        })
+      )
+    );
   });
+}
+
+/**
+ * 把粘贴进来的一段文本解析成属性。
+ *
+ * 一行一项，认这几种写法：
+ *   【金币】：9900      金币：9900      金币:9900
+ *   金币	9900          金币 9900
+ * 冒号后面留空也算（就是「有这个名字、值先空着」）。
+ *
+ * 认不出来的行**直接跳过**，不报错 —— 粘贴过来的文本经常带标题、空行、说明文字，
+ * 为了几行杂音打断整次粘贴不值得。跳过了多少行会告诉用户。
+ */
+function parseAttributesFromText(text) {
+  const pairs = [];
+  const seen = new Set();
+  let skipped = 0;
+
+  for (const rawLine of String(text || '').split('\n')) {
+    // 去掉列表符号（- * + •）和首尾空白
+    const line = rawLine.trim().replace(/^[-*+•]\s*/, '').trim();
+    if (!line) continue;
+
+    // 【名字】：值 —— 先试这个，否则下面的通用规则会把「【金币】」连括号一起当名字
+    let m = line.match(/^【([^】\n]{1,24})】\s*[：:]\s*(.*)$/);
+    // 名字：值 / 名字:值
+    if (!m) m = line.match(/^([^：:\n]{1,24}?)\s*[：:]\s*(.*)$/);
+    // 名字 + 空格/Tab + 值
+    if (!m) m = line.match(/^([^\s：:]{1,24})[\s\u3000]+(.+)$/);
+
+    if (!m) {
+      skipped++;
+      continue;
+    }
+
+    const name = m[1].trim();
+    const value = String(m[2] || '').trim().slice(0, 200);
+    if (!name || seen.has(name)) continue;
+    if (!panelFieldAllowed(name)) {
+      skipped++;
+      continue;
+    }
+
+    seen.add(name);
+    pairs.push({ name: name.slice(0, 24), value });
+  }
+
+  return { pairs, skipped };
+}
+
+/** 把解析出来的属性并进草稿：新的追加，同名的覆盖值 */
+function applyParsedAttributes(pairs) {
+  let added = 0;
+  let updated = 0;
+
+  for (const item of pairs) {
+    const existing = charAttrs.find((a) => a.name === item.name);
+    if (existing) {
+      if (existing.value !== item.value) {
+        existing.value = item.value;
+        updated++;
+      }
+      continue;
+    }
+    if (charAttrs.length >= MAX_PANEL_FIELDS) break;
+    charAttrs.push({ name: item.name, value: item.value });
+    added++;
+  }
+
+  renderCharAttrs();
+  return { added, updated };
+}
+
+function toggleAttrPaste(show) {
+  const next = typeof show === 'boolean' ? show : el.c.attrPaste.classList.contains('hidden');
+  el.c.attrPaste.classList.toggle('hidden', !next);
+  if (next) el.c.attrPasteText.focus();
+}
+
+/** 点「解析并加入」：解析 + 合并 + 告诉用户结果 */
+function applyAttrPaste() {
+  const text = el.c.attrPasteText.value;
+  if (!String(text).trim()) {
+    showToast('先把文本粘进来', 'error');
+    el.c.attrPasteText.focus();
+    return;
+  }
+
+  const { pairs, skipped } = parseAttributesFromText(text);
+  if (!pairs.length) {
+    showToast('没认出任何属性，检查一下格式（一行一项，比如「金币：9900」）', 'error');
+    return;
+  }
+
+  const { added, updated } = applyParsedAttributes(pairs);
+  el.c.attrPasteText.value = '';
+  toggleAttrPaste(false);
+
+  const bits = [];
+  if (added) bits.push(`新增 ${added} 项`);
+  if (updated) bits.push(`更新 ${updated} 项`);
+  if (skipped) bits.push(`跳过 ${skipped} 行`);
+  showToast(`已解析：${bits.join('，')}`, 'ok');
 }
 
 /** 加一个属性：保留字拦下，重名跳过 */
@@ -4263,36 +4601,91 @@ function addCharAttr(rawName) {
 }
 
 /**
- * 把角色卡上的属性种进会话的状态面板 —— 这就是属性模板唯一的作用。
- *
- * 只补面板里还没有的字段，同名的保留面板里的当前值：
- * 半路给会话绑角色，不该把这一局已经跑出来的数值冲掉。
+ * 往状态面板里补字段。已存在的跳过（同名的保留面板里的当前值 ——
+ * 半路给会话绑角色，不该把这一局已经跑出来的数值冲掉），
+ * 初始值只在「这个字段是刚种进去的」时候落地。
  */
-function seedPanelFromCharacters(convo, list) {
-  if (!convo || !Array.isArray(list)) return false;
+function appendPanelFields(convo, pairs) {
+  if (!convo || !pairs.length) return false;
 
   const fields = [...convoPanelFields(convo)];
   const panel = { ...convoPanel(convo) };
   const known = new Set(fields);
+  let changed = false;
 
-  for (const character of list) {
-    for (const attr of characterAttrs(character)) {
-      if (known.has(attr.name)) continue;
-      if (!panelFieldAllowed(attr.name)) continue;
-      if (fields.length >= MAX_PANEL_FIELDS) break;
+  for (const [name, value] of pairs) {
+    if (!name || known.has(name)) continue;
+    if (!panelFieldAllowed(name)) continue;
+    if (fields.length >= MAX_PANEL_FIELDS) break;
 
-      fields.push(attr.name);
-      known.add(attr.name);
-      // 初始值只在「这个字段是刚种进去的」时候落地
-      if (String(attr.value || '').trim()) panel[attr.name] = String(attr.value).slice(0, 500);
-    }
+    fields.push(name);
+    known.add(name);
+    changed = true;
+    const text = String(value == null ? '' : value).trim();
+    if (text) panel[name] = text.slice(0, 500);
   }
 
-  const before = convoPanelFields(convo).join('\u0001');
-  if (before === fields.join('\u0001')) return false;
+  if (!changed) return false;
 
   convo.panelFields = fields;
   convo.panel = panel;
+  convo.updatedAt = now();
+  return true;
+}
+
+/** 把角色卡上的「属性」种进会话的状态面板 */
+function seedPanelFromCharacters(convo, list) {
+  if (!convo || !Array.isArray(list)) return false;
+
+  const pairs = [];
+  for (const character of list) {
+    for (const attr of characterAttrs(character)) pairs.push([attr.name, attr.value]);
+  }
+  return appendPanelFields(convo, pairs);
+}
+
+/**
+ * 把「身份四项」（姓名 / 年龄 / 性别 / 种族）种进状态面板。
+ *
+ * 两处都用它，但「这是谁的身份」不一样：
+ *   · 单角色对话：是你绑的那张卡的身份（姓名 = 角色名）。模型不知道就只能瞎编 ——
+ *     实测 16 岁的角色被回复成 21 岁。
+ *   · 游玩世界书：是「你自己」的身份（姓名 = 你在弹窗里填的名字，其余来自选的卡）。
+ *
+ * 为什么身份也要进面板：世界里时间会走、剧情会推 —— 过一年年龄要涨一岁，
+ * 被人改了名字也得跟着改。交给「每轮由程序权威注入」的面板维护，
+ * 比让模型自己记牢靠得多。
+ */
+function seedIdentity(convo, name, character) {
+  const pairs = [];
+  const trimmed = String(name || '').trim();
+  if (trimmed) pairs.push(['姓名', trimmed]);
+
+  if (character) {
+    const age = String(character.age || '').trim();
+    const gender = String(character.gender || '').trim();
+    const race = String(character.race || '').trim();
+    if (age) pairs.push(['年龄', age]);
+    if (gender) pairs.push(['性别', gender]);
+    if (race) pairs.push(['种族', race]);
+  }
+
+  return appendPanelFields(convo, pairs);
+}
+
+/**
+ * 面板里的「姓名」被剧情改了 → 跟着改会话上的玩家名。
+ * 不跟着改就会出现「面板说你叫 A，消息标签和 {{user}} 还叫你 B」的矛盾。
+ * 只对进了世界的会话生效（普通角色扮演没有「玩家角色」这一说）。
+ */
+function syncPlayerNameFromPanel(convo) {
+  const player = convo && convo.player;
+  if (!player || typeof player !== 'object') return false;
+
+  const name = String(convoPanel(convo)['姓名'] || '').trim();
+  if (!name || name === player.name) return false;
+
+  player.name = name.slice(0, 40);
   convo.updatedAt = now();
   return true;
 }
@@ -4316,6 +4709,10 @@ function stashCharForm() {
   character.systemPrompt = el.c.system.value;
   character.postHistoryInstructions = el.c.post.value;
   character.creatorNotes = el.c.notes.value;
+  // 身份三项：年龄和种族是自由文本（「不详」「精灵」都合法），性别用选择框
+  character.age = el.c.age.value.trim().slice(0, 40);
+  character.gender = GENDERS.includes(el.c.gender.value) ? el.c.gender.value : '';
+  character.race = el.c.race.value.trim().slice(0, 40);
   // 属性是编辑期间的草稿（charAttrs），保存时才写回角色卡
   character.attributes = charAttrs
     .filter((a) => a.name.trim())
@@ -4362,6 +4759,9 @@ function startCharDraft() {
     creatorNotes: '',
     tags: [],
     attributes: [],
+    age: '',
+    gender: '',
+    race: '人类', // 新建的角色默认就是人类，省得每次打
     source: 'manual',
     createdAt: now(),
     updatedAt: now()
@@ -4677,6 +5077,7 @@ async function init() {
 
   // 主题以设置里的值为准（preload 已经按启动参数先打过一次，这里只是对齐）
   applyTheme(state.settings.theme);
+  applyChatAppearance();
 
   const storedChars = await api.getCharacters();
   state.characters = Array.isArray(storedChars && storedChars.characters) ? storedChars.characters : [];

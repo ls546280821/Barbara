@@ -65,6 +65,11 @@ const COMMON_MODELS = [...new Set(PROVIDER_PRESETS.flatMap((p) => p.models))];
 
 const DEFAULT_PROVIDER_ID = 'p1';
 
+// 对话窗口背景图的上限。压缩后一般也就几百 KB，这里给足余量，
+// 但必须有上限 —— 否则一张大图能把 config.json 撑到几十 MB，
+// 而这个文件每次改设置都要整份重写。
+const MAX_CHAT_BACKGROUND_CHARS = 4000000;
+
 // 角色「属性」的快捷候选词。
 // 在角色编辑器里点一下就能多一个属性字段名，纯粹是省打字 —— 不承载任何逻辑，
 // 所以它就是一个字符串数组，放在设置里可编辑就够了，不值得单开一套「管理」界面。
@@ -116,7 +121,11 @@ const DEFAULT_SETTINGS = {
   theme: 'light',
   sendOnEnter: true,
   showDate: true,
-  showUsage: true
+  showUsage: true,
+  // --- 对话窗口外观（只影响显示，不进提示词）---
+  chatFontSize: 14,     // 消息正文字号（px）
+  chatBoldColor: '',    // **加粗** 用什么颜色，空 = 跟随主题
+  chatBackground: ''    // 消息区背景图（dataURL），空 = 没有
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +357,22 @@ function normalizeSettings(saved) {
   // 界面主题
   s.theme = raw.theme === 'dark' ? 'dark' : 'light';
 
+  // 对话窗口外观。这三个都只影响显示，所以「值不合法就退回默认」是安全的。
+  const fontSize = Number(raw.chatFontSize);
+  s.chatFontSize =
+    Number.isFinite(fontSize) && fontSize >= 12 && fontSize <= 22
+      ? Math.round(fontSize)
+      : DEFAULT_SETTINGS.chatFontSize;
+
+  const boldColor = typeof raw.chatBoldColor === 'string' ? raw.chatBoldColor.trim() : '';
+  // 只收 #rgb / #rrggbb / #rrggbbaa，别的（比如 'red'）一律当没设过 ——
+  // 免得有人往里塞 `red; background:url(...)` 这种东西
+  s.chatBoldColor = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(boldColor) ? boldColor : '';
+
+  const bg = typeof raw.chatBackground === 'string' ? raw.chatBackground : '';
+  s.chatBackground =
+    bg.startsWith('data:image/') && bg.length <= MAX_CHAT_BACKGROUND_CHARS ? bg : '';
+
   // 常用属性候选词：去重、去空、限个数。
   // 注意判断的是「磁盘上有没有这个键」—— 用户把清单清空是合法操作，
   // 不能因为合并结果为空就又把默认值塞回去。
@@ -504,7 +529,6 @@ function saveConversations(payload, options) {
 // 这个上限必须大于「导入上限 × 4/3」（base64 会膨胀约 1.34 倍），
 // 否则合法导入的 PNG 会在保存时被悄悄丢掉头像。
 const MAX_IMPORT_BYTES = 12 * 1024 * 1024; // 单个角色卡 / 头像文件最大 12MB
-const MAX_AVATAR_CHARS = 18000000; // ≈ 13MB 的 PNG，留足余量
 
 // 允许当头像的图片格式（扩展名 → MIME）
 const IMAGE_MIME = {
@@ -520,37 +544,12 @@ function charactersFile() {
   return userDataFile('characters.json');
 }
 
-function newCharacterId() {
-  return `c${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
-}
-
-/** 把任意来源的角色数据整理成内部统一格式，顺便挡住非法值 */
-function normalizeCharacter(raw, source) {
-  const r = raw && typeof raw === 'object' ? raw : {};
-  const str = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
-
-  const avatar = typeof r.avatar === 'string' && r.avatar.startsWith('data:image/') ? r.avatar : '';
-
-  return {
-    id: typeof r.id === 'string' && r.id ? r.id : newCharacterId(),
-    name: str(r.name, 120).trim() || '未命名角色',
-    avatar: avatar.length <= MAX_AVATAR_CHARS ? avatar : '',
-    description: str(r.description, 20000),
-    personality: str(r.personality, 10000),
-    scenario: str(r.scenario, 10000),
-    firstMes: str(r.firstMes, 10000),
-    mesExample: str(r.mesExample, 30000),
-    systemPrompt: str(r.systemPrompt, 10000),
-    postHistoryInstructions: str(r.postHistoryInstructions, 10000),
-    creatorNotes: str(r.creatorNotes, 5000),
-    tags: Array.isArray(r.tags)
-      ? r.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 40)).slice(0, 20)
-      : [],
-    source: ['png', 'json', 'manual'].includes(r.source) ? r.source : source || 'manual',
-    createdAt: Number(r.createdAt) || Date.now(),
-    updatedAt: Number(r.updatedAt) || Date.now()
-  };
-}
+/**
+ * 把任意来源的角色数据整理成内部统一格式，顺便挡住非法值。
+ * 具体实现搬到了 main/characters.js —— 这样 tools/smoke-test.js 能 require 到同一份代码，
+ * 测的就是真东西，而不是自己糊一套假的（角色「属性」丢过一次，就是假后端测不出来的那类问题）。
+ */
+const { normalizeCharacter } = require('./main/characters.js');
 
 function loadCharacters() {
   const data = loadJsonWithFallback(charactersFile());
