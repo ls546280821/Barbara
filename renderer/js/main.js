@@ -3833,6 +3833,81 @@ async function saveSettings(silent) {
   return state.settings;
 }
 
+/**
+ * 各服务商的已知模型目录。
+ *
+ * 用途：「拉取可用模型」走的是 OpenAI 那套 GET /models，但不少国内服务商
+ * 根本没有这个接口（智谱就是），请求会被网关拒掉（常见 406）。
+ * 这种情况下不能让用户卡死在一个看不懂的错误码上，所以给一份内置目录兜底。
+ *
+ * 按接口地址里的域名匹配，而不是按服务商名字 —— 名字用户可以随便改。
+ */
+const MODEL_CATALOG = [
+  {
+    match: /bigmodel\.cn/i,
+    name: '智谱 GLM',
+    note: '智谱没有「模型列表」接口，请从下面挑一个填进去',
+    models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.3-flashx', 'glm-5.2']
+  },
+  {
+    match: /dashscope\.aliyuncs\.com/i,
+    name: '通义千问',
+    note: '通义的 OpenAI 兼容模式对部分 Key 不返回模型列表，可先手填',
+    models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen-long']
+  },
+  {
+    match: /moonshot\.cn/i,
+    name: 'Kimi',
+    note: 'Moonshot 支持模型列表；若拉取失败可从下面挑',
+    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
+  },
+  {
+    match: /deepseek\.com/i,
+    name: 'DeepSeek',
+    note: 'DeepSeek 支持模型列表；若拉取失败可从下面挑',
+    models: ['deepseek-chat', 'deepseek-reasoner']
+  }
+];
+
+function catalogForBaseUrl(baseUrl) {
+  const url = String(baseUrl || '');
+  return MODEL_CATALOG.find((c) => c.match.test(url)) || null;
+}
+
+/** 拉取失败时，判断是不是「这个服务商压根没有模型列表接口」 */
+function looksLikeUnsupportedModelList(message) {
+  const text = String(message || '');
+  return (
+    /\b(406|404|405|501)\b/.test(text) ||
+    /不被接受|找不到接口|不支持|Not Acceptable|Method Not Allowed/i.test(text)
+  );
+}
+
+/**
+ * 把内置目录里的模型填进模型输入框。
+ * replace=false 时只补空缺，不动用户已经写好的内容。
+ */
+function applyCatalogModels(catalog, replace) {
+  if (!catalog) return 0;
+
+  const existing = String(el.p.models.value || '')
+    .split(/[\n,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const next = replace ? [...catalog.models] : [...existing];
+  if (!replace) {
+    for (const m of catalog.models) {
+      if (!next.includes(m)) next.push(m);
+    }
+  }
+
+  el.p.models.value = next.join('\n');
+  stashProviderForm();
+  renderModelSwitch();
+  return next.length;
+}
+
 async function testConnection() {
   stashProviderForm();
   const provider = providerById(editingProviderId);
@@ -3879,7 +3954,21 @@ async function fetchModels() {
       'ok'
     );
   } catch (err) {
-    showToast((err && err.message) || '获取模型列表失败', 'error');
+    const message = (err && err.message) || '获取模型列表失败';
+
+    // 该服务商没有模型列表接口时（智谱就是），不要只丢一个 HTTP 错误码给用户，
+    // 直接把已知模型填上，让流程能继续走下去。
+    const catalog = catalogForBaseUrl(provider.baseUrl);
+    if (catalog && looksLikeUnsupportedModelList(message)) {
+      const hasExisting = String(el.p.models.value || '').trim().length > 0;
+      const count = applyCatalogModels(catalog, !hasExisting);
+      showToast(
+        `${catalog.name}不支持「拉取模型列表」，已${hasExisting ? '补充' : '填入'} ${count} 个已知模型，可直接保存`,
+        'ok'
+      );
+    } else {
+      showToast(message, 'error');
+    }
   } finally {
     el.btnFetchModels.disabled = false;
     el.btnFetchModels.textContent = '拉取可用模型';

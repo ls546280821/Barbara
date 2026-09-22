@@ -44,7 +44,9 @@ const PROVIDER_PRESETS = [
     key: 'zhipu',
     name: '智谱 GLM',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4-flash', 'glm-4-plus']
+    // 智谱没有 OpenAI 那样的 GET /models 接口，「拉取可用模型」对它一定失败，
+    // 所以这里给的是可直接手填的常用模型名（当前主推 GLM-5.3 系列）。
+    models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.2']
   },
   {
     key: 'kimi',
@@ -920,7 +922,10 @@ function worldbookEntriesByIds(ids) {
 function buildHeaders(settings) {
   const headers = {
     'Content-Type': 'application/json',
-    Accept: 'text/event-stream'
+    Accept: 'text/event-stream',
+    // 显式带 User-Agent：部分服务商前面挂了 WAF，对没有 UA 的请求会直接拒绝
+    // （返回 403 / 406 之类的网关错误），而不是返回接口本身的错误码。
+    'User-Agent': 'Barbara/1.0 (+https://github.com/ls546280821/Barbara)'
   };
   if (settings.apiKey) {
     headers.Authorization = `Bearer ${settings.apiKey}`;
@@ -1125,11 +1130,28 @@ function requestJson({ url, method = 'GET', headers = {}, body = null, timeoutMs
 }
 
 function describeHttpError(status, text) {
-  const snippet = String(text || '').slice(0, 400);
+  // 保留足够长的响应体：网关/WAF 返回的 HTML 错误页往往很长，
+  // 截太短就只剩「HTTP 406」这种没信息量的提示，排查不了问题。
+  const raw = String(text || '').trim();
+  const snippet = raw.length > 1500 ? `${raw.slice(0, 1500)}…` : raw;
+
+  if (status === 400) return `400 请求被拒绝：多半是参数不被该服务商接受（比如 max_tokens 超范围、模型名不对）。\n${snippet}`;
   if (status === 401) return `401 未授权：API Key 不对或已失效。\n${snippet}`;
   if (status === 402) return `402 余额不足：账户需要充值。\n${snippet}`;
-  if (status === 403) return `403 拒绝访问：Key 没有该模型的权限。\n${snippet}`;
+  if (status === 403) return `403 拒绝访问：Key 没有该模型的权限，或请求被网关拦截。\n${snippet}`;
   if (status === 404) return `404 找不到接口：多半是「接口地址」写错了，应类似 https://api.deepseek.com。\n${snippet}`;
+  if (status === 406) {
+    return (
+      '406 请求不被接受：服务端（或它前面的网关）拒绝了这次请求的格式。\n' +
+      '常见原因，按可能性排序：\n' +
+      '  1. 「接口地址」写得不完整或多写了路径 —— 应是官方文档给的根地址（例如智谱是 https://open.bigmodel.cn/api/paas/v4）\n' +
+      '  2. 公司网络 / 代理 / VPN 在中间改了请求头\n' +
+      '  3. 这个 Key 没有开通该模型的权限\n' +
+      '下面这段是服务端原样返回的内容，通常能看出是谁拒绝的：\n' +
+      snippet
+    );
+  }
+  if (status === 415) return `415 不支持的内容类型：请求体格式被拒绝。\n${snippet}`;
   if (status === 429) return `429 请求太频繁或超出配额，稍后再试。\n${snippet}`;
   if (status >= 500) return `${status} 服务端错误，通常稍后重试即可。\n${snippet}`;
   return `HTTP ${status}\n${snippet}`;
