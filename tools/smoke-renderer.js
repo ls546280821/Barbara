@@ -1007,6 +1007,102 @@ await scenario('角色属性：粘贴文本批量生成', async () => {
 });
 
 // ---------------------------------------------------------------------------
+//  场景 19：会话分支 + 存档点
+//
+//  「分支」= 另开一个会话把前 N 条复制过去（当前这条线一个字节都不动）；
+//  「存档点」= 当前会话内的快照，读档会整个退回去。
+// ---------------------------------------------------------------------------
+await scenario('会话：分支与存档点', async () => {
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  await sleep(250);
+
+  const before = await window.barbara.getConversations();
+  const origin = before.conversations.find((c) => c.id === before.activeId);
+  check('有一个够长的会话可以分支', !!origin && (origin.messages || []).length >= 2, `消息 ${origin && (origin.messages || []).length} 条`);
+
+  // --- 分支 ---
+  const nodes = $$('#messages .msg');
+  check('消息列表够长', nodes.length >= 2, String(nodes.length));
+  check('消息上有「分支」入口', !!buttonByText(nodes[1], '分支'), '没找到');
+
+  click(buttonByText(nodes[1], '分支'));
+  await sleep(500);
+
+  const after = await window.barbara.getConversations();
+  check('多出了一个会话', after.conversations.length === before.conversations.length + 1, `${before.conversations.length} → ${after.conversations.length}`);
+
+  const branch = after.conversations.find((c) => c.id === after.activeId);
+  check('新会话成了当前会话', !!branch && branch.id !== origin.id, branch && String(branch.id));
+  check('标题标了「分支」', !!branch && String(branch.title).includes('（分支）'), branch && branch.title);
+  check('前两条原样复制过去了', !!branch && branch.messages.length === 2, branch && String(branch.messages.length));
+  check('消息内容也对得上', !!branch && branch.messages[1].content === origin.messages[1].content, '');
+  check('绑定的世界书跟着走', !!branch && (branch.worldbookIds || []).length === (origin.worldbookIds || []).length, '');
+
+  // 关键：原来那条线一个字都没动
+  const originAfter = after.conversations.find((c) => c.id === origin.id);
+  check(
+    '原来那条线完好无损',
+    !!originAfter && originAfter.messages.length === origin.messages.length,
+    `${origin.messages.length} 条 → ${originAfter && originAfter.messages.length} 条`
+  );
+
+  // --- 存档点 ---
+  click('#btn-memory');
+  await waitFor('记忆弹窗打开', () => shown('#memory-modal'));
+  await sleep(200);
+
+  check('记忆弹窗里有「存档点」一节', !!byId('checkpoint-list'), '没找到');
+  check('一开始没有存档点', byId('checkpoint-list').textContent.includes('还没有存档点'), byId('checkpoint-list').textContent.trim().slice(0, 24));
+
+  click('#btn-save-checkpoint');
+  await sleep(350);
+  check('存下了一个档', $$('#checkpoint-list .checkpoint-row').length === 1, String($$('#checkpoint-list .checkpoint-row').length));
+  const rowName = $('#checkpoint-list .checkpoint-name').textContent;
+  check('档名写明了存的时候有几条消息', rowName.includes('2 条消息'), rowName);
+
+  click('#btn-close-memory');
+  await sleep(250);
+
+  // --- 存完档再聊一条，然后读档退回去 ---
+  setValue('#input', '这条是存完档之后聊的，读档应该把它退掉');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 10000);
+  // 落盘是防抖的（350ms），等久一点再读磁盘，否则读到的是上一步的快照
+  await sleep(700);
+
+  const grownNodes = $$('#messages .msg').length;
+  check('界面上长长了（存档之后又聊了）', grownNodes > 2, `${grownNodes} 条`);
+
+  const grown = (await window.barbara.getConversations()).conversations.find((c) => c.id === branch.id);
+  check('新消息也落盘了', grown.messages.length === grownNodes, `界面 ${grownNodes} 条 / 磁盘 ${grown.messages.length} 条`);
+
+  click('#btn-memory');
+  await waitFor('记忆弹窗打开', () => shown('#memory-modal'));
+  await sleep(200);
+
+  click(buttonByText($('#checkpoint-list .checkpoint-row'), '读档'));
+  await waitFor('读档前先确认', () => shown('#confirm-modal'));
+  check('确认文案说明了会丢内容', $('#confirm-message').textContent.includes('回到'), $('#confirm-message').textContent.trim().slice(0, 30));
+  click('#confirm-ok');
+  await sleep(600);
+
+  const restored = (await window.barbara.getConversations()).conversations.find((c) => c.id === branch.id);
+  check('读档后退回到存档时的条数', restored.messages.length === 2, `${grown.messages.length} → ${restored.messages.length}`);
+  check('存档点本身还留着（能再读一次）', $$('#checkpoint-list .checkpoint-row').length === 1, String($$('#checkpoint-list .checkpoint-row').length));
+
+  // --- 删掉存档点 ---
+  click(buttonByText($('#checkpoint-list .checkpoint-row'), '删除'));
+  await waitFor('删除前先确认', () => shown('#confirm-modal'));
+  click('#confirm-ok');
+  await sleep(450);
+  check('删掉后回到空状态', byId('checkpoint-list').textContent.includes('还没有存档点'), byId('checkpoint-list').textContent.trim().slice(0, 24));
+
+  click('#btn-close-memory');
+  await sleep(200);
+});
+
+// ---------------------------------------------------------------------------
 //  准备悬停验证（必须放最后：它会把卡片摆好交给宿主）
 // ---------------------------------------------------------------------------
 let hoverProbe = null;

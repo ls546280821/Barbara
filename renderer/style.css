@@ -580,6 +580,40 @@ body {
   margin-top: 8px;
 }
 
+/* 存档点：一行一个，左边说明右边操作 */
+.checkpoint-section { margin-top: 4px; }
+
+.checkpoint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.checkpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.checkpoint-info { flex: 1 1 auto; min-width: 0; }
+
+.checkpoint-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.checkpoint-time {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 /* 候选切换：‹ 2/3 › —— 重新生成过才会有多个版本。
    放在角色行里常驻显示，这样一眼能看出「这条留了几个版本」；
    放操作栏的话要悬停才看得见，等于发现不了。 */

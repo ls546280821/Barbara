@@ -69,6 +69,8 @@ export const el = {
   memoryModal: $('memory-modal'),
   btnCloseMemory: $('btn-close-memory'),
   btnCloseMemory2: $('btn-close-memory-2'),
+  btnSaveCheckpoint: $('btn-save-checkpoint'),
+  checkpointList: $('checkpoint-list'),
   memorySummaryLine: $('memory-summary-line'),
   memoryPendingLine: $('memory-pending-line'),
   memoryList: $('memory-list'),

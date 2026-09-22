@@ -750,6 +750,17 @@ function messageNode(message, index, character, labels) {
   del.addEventListener('click', () => removeMessage(index));
   actions.appendChild(del);
 
+  // 从这条分出一条新线：不动当前会话，另外复制一个出来
+  if (!isError) {
+    const branch = document.createElement('button');
+    branch.className = 'mini-btn';
+    branch.textContent = '分支';
+    branch.title = '从这条起另开一个会话（当前这条线原样保留）';
+    branch.setAttribute('aria-label', '从这条消息分支');
+    branch.addEventListener('click', () => branchFromMessage(index));
+    actions.appendChild(branch);
+  }
+
   body.appendChild(actions);
 
   wrap.appendChild(avatar);
@@ -1822,6 +1833,187 @@ function closeMemoryModal() {
   el.input.focus();
 }
 
+// ---------------------------------------------------------------------------
+//  存档点 / 分支
+//
+//  两个都是「想走另一条剧情线」的手段，区别在**代价**：
+//    · 分支：从某条消息另开一个会话，这个会话原样留着 —— 什么都不丢
+//    · 存档点：在当前会话里存一份快照，读档 = 整个退回去 —— 存完之后聊的会没
+//  所以界面上必须把这点说清楚，不然用户会以为读档也能反悔。
+// ---------------------------------------------------------------------------
+
+// 存档点上限。每份都是一整段对话的副本，攒多了会把 conversations.json 撑大
+const MAX_CHECKPOINTS = 12;
+
+/** 深拷一份存档点内容（消息 / 面板 / 摘要 / 玩家角色） */
+function snapshotConvo(convo) {
+  return {
+    messages: JSON.parse(JSON.stringify(convo.messages || [])),
+    panel: { ...(convoPanel(convo) || {}) },
+    panelFields: [...convoPanelFields(convo)],
+    summaries: JSON.parse(JSON.stringify(convoSummaries(convo))),
+    player: convo.player ? { ...convo.player } : null
+  };
+}
+
+/** 存一个档 */
+function saveCheckpoint() {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const count = (convo.messages || []).length;
+  if (!count) {
+    showToast('这个会话还是空的，没什么可存的', 'error');
+    return;
+  }
+
+  if (!Array.isArray(convo.checkpoints)) convo.checkpoints = [];
+
+  const summaries = convoSummaries(convo).length;
+  const name = `${count} 条消息${summaries ? ` · ${summaries} 段摘要` : ''}`;
+  convo.checkpoints.unshift({ id: uid(), at: now(), name, ...snapshotConvo(convo) });
+
+  if (convo.checkpoints.length > MAX_CHECKPOINTS) convo.checkpoints.length = MAX_CHECKPOINTS;
+
+  persistConversations(0);
+  renderMemoryModal();
+  showToast(`已存档（${name}）`, 'ok');
+}
+
+/** 读档：整个退回去。存完之后聊的内容会丢，所以先确认 */
+async function restoreCheckpoint(id) {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const point = (convo.checkpoints || []).find((c) => c.id === id);
+  if (!point) return;
+
+  const ok = await confirmDialog({
+    title: '读档',
+    message:
+      `回到「${point.name}」？\n\n` +
+      '这段时间聊的内容会丢掉。存档点本身还留着，可以再回到这里。\n' +
+      '想「保住现在这条线」的话，用消息上的「分支」更稳。',
+    confirmText: '读档'
+  });
+  if (!ok) return;
+
+  const data = JSON.parse(JSON.stringify(point));
+  convo.messages = data.messages || [];
+  convo.panel = data.panel || {};
+  convo.panelFields = data.panelFields || [];
+  convo.summaries = data.summaries || [];
+  if (data.player) convo.player = data.player;
+  convo.updatedAt = now();
+  state.usage = null;
+
+  persistConversations(0);
+  renderAll({ forceScroll: true });
+  renderMemoryModal();
+  showToast('已回到存档点', 'ok');
+}
+
+async function deleteCheckpoint(id) {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  const ok = await confirmDialog({
+    title: '删掉这个存档点',
+    message: '删掉之后就回不到这个时间点了。',
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
+
+  convo.checkpoints = (convo.checkpoints || []).filter((c) => c.id !== id);
+  persistConversations(0);
+  renderMemoryModal();
+  showToast('已删掉存档点', 'ok');
+}
+
+function renderCheckpoints(convo) {
+  clear(el.checkpointList);
+
+  const points = Array.isArray(convo.checkpoints) ? convo.checkpoints : [];
+  el.btnSaveCheckpoint.disabled = !(convo.messages || []).length;
+
+  if (!points.length) {
+    el.checkpointList.appendChild(
+      h('div', { class: 'memory-empty', text: '还没有存档点。想「先存一下再往前写」就点上面的按钮。' })
+    );
+    return;
+  }
+
+  for (const point of points) {
+    const when = new Date(point.at || Date.now()).toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    el.checkpointList.appendChild(
+      h(
+        'div',
+        { class: 'checkpoint-row' },
+        h(
+          'div',
+          { class: 'checkpoint-info' },
+          h('div', { class: 'checkpoint-name', text: point.name }),
+          // 档名里已经写了条数，这里就只报时间，不重复
+          h('div', { class: 'checkpoint-time', text: when })
+        ),
+        button({ class: 'btn btn-primary btn-sm', text: '读档', onClick: () => restoreCheckpoint(point.id) }),
+        button({ class: 'btn btn-ghost btn-sm', text: '删除', onClick: () => deleteCheckpoint(point.id) })
+      )
+    );
+  }
+}
+
+/**
+ * 从某条消息分出一条新线。
+ *
+ * 做法是**另开一个会话，把前 N 条原样复制过去** —— 当前会话一个字节都不动。
+ * 所以走岔了随时切回来，两边还能并排对比（侧栏里就是两条会话）。
+ * 比真做消息树简单得多，也不会因为一次误操作丢掉整条线。
+ */
+function branchFromMessage(index) {
+  const convo = activeConvo();
+  if (!convo) return;
+  if (state.streaming) {
+    showToast('正在生成，等它写完再分支');
+    return;
+  }
+
+  const cut = Math.max(0, Math.min(index, convo.messages.length - 1)) + 1;
+  const id = uid();
+
+  const branch = {
+    id,
+    title: `${convo.title || '新对话'}（分支）`,
+    createdAt: now(),
+    updatedAt: now(),
+    // 戏本身的东西照搬：绑的角色、世界书、玩家、状态面板、视角设置
+    characterId: convo.characterId || null,
+    worldbookIds: [...convoWorldbookIds(convo)],
+    gmMode: convo.gmMode === true,
+    player: convo.player ? { ...convo.player } : null,
+    panelFields: [...convoPanelFields(convo)],
+    panel: { ...convoPanel(convo) },
+    messages: JSON.parse(JSON.stringify(convo.messages.slice(0, cut))),
+    // 摘要不搬：它压缩的是「最早那批消息」，而新会话里这批消息是原样留着的，
+    // 搬过去等于同一段内容被记两遍。新线从零开始攒记忆。
+    summaries: [],
+    checkpoints: []
+  };
+
+  state.conversations.unshift(branch);
+  state.activeId = id;
+  persistConversations(0);
+  renderAll({ forceScroll: true });
+  showToast(`已分出一条新线（前 ${cut} 条照搬，原来那条没动）`, 'ok');
+}
+
 function renderMemoryModal() {
   const convo = activeConvo();
   if (!convo) return;
@@ -1839,6 +2031,9 @@ function renderMemoryModal() {
   el.btnSummarizeNow.disabled = pending.length < SUMMARY_MIN_MESSAGES || !!convo.summaryBusy;
   el.btnMemoryClear.disabled = list.length === 0;
   el.memoryFootHint.textContent = `「${convo.title || '新对话'}」的摘要只保存在你自己电脑上`;
+
+  // 存档点在下面那一节，跟摘要没关系 —— 得放在「没有摘要就 return」之前
+  renderCheckpoints(convo);
 
   el.memoryList.innerHTML = '';
 
@@ -4006,6 +4201,7 @@ function bindEvents() {
   el.btnMemory.addEventListener('click', openMemoryModal);
   el.btnCloseMemory.addEventListener('click', closeMemoryModal);
   el.btnCloseMemory2.addEventListener('click', closeMemoryModal);
+  el.btnSaveCheckpoint.addEventListener('click', saveCheckpoint);
   el.btnSummarizeNow.addEventListener('click', summarizeNow);
   el.btnMemoryClear.addEventListener('click', clearAllSummaries);
   el.memoryModal.addEventListener('click', (event) => {

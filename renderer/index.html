@@ -830,6 +830,34 @@
         </p>
 
         <div id="memory-list" class="memory-list"></div>
+
+        <!-- 存档点：把当前这一整段对话存一份，走岔了能整个退回来 -->
+        <section class="panel-section checkpoint-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+                <path d="M17 21v-8H7v8M7 3v5h8" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">存档点</div>
+              <div class="panel-desc">把当前这段对话整个存一份，以后随时退回来</div>
+            </div>
+          </div>
+
+          <div class="memory-actions">
+            <button id="btn-save-checkpoint" class="btn btn-ghost btn-sm" type="button">存一个档</button>
+          </div>
+
+          <p class="field-help">
+            存档 = 把现在的消息记录整个复制一份（含状态面板）。<br />
+            读档会把对话<b>还原成存档时的样子</b>，之后聊的内容会没了 —— 所以读档前会先确认。<br />
+            想「走另一条剧情线又不想丢掉现在这条」，用消息上的<b>「分支」</b>更好。
+          </p>
+
+          <div id="checkpoint-list" class="checkpoint-list"></div>
+        </section>
       </div>
 
       <footer class="modal-foot">
