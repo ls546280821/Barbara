@@ -606,14 +606,19 @@
               </span>
             </div>
 
-            <!-- 角色自带的世界书：导入带 character_book 的角色卡时会有。
-                 开关关掉后，这张角色无论单独聊天、还是被绑进某个世界当角色，
-                 都不会带入它自己的世界书。 -->
-            <div id="c-worldbook-box" class="char-worldbook-box hidden">
-              <label class="check">
+            <!-- 角色自带的世界书：导入带 character_book 的角色卡时会自动绑上，
+                 也可以在这里手动绑定。开关关掉后，这张角色无论单独聊天、
+                 还是被绑进某个世界当角色，都不会带入它自己的世界书。 -->
+            <div id="c-worldbook-box" class="char-worldbook-box">
+              <div class="cwb-head">
+                <span class="field-label">自带世界书</span>
+                <button id="c-wb-add-btn" class="btn btn-ghost btn-sm" type="button">＋ 绑定</button>
+              </div>
+              <div id="c-wb-list" class="cwb-list"></div>
+              <label class="check" id="c-wb-switch">
                 <input id="c-wb-enabled" type="checkbox" checked />
                 <span class="check-text">
-                  <span class="check-title">启用角色自带的世界书</span>
+                  <span class="check-title">启用自带的世界书</span>
                   <span class="check-desc" id="c-wb-desc"></span>
                 </span>
               </label>

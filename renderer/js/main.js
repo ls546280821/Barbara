@@ -37,6 +37,9 @@ let editingCharacterId = null; // 角色库里当前正在编辑的角色
 // 同一个编辑器两处复用 —— 从世界书里点「编辑」改的是书里那份副本，不动角色库。
 let charEditorScope = 'library';
 let charDraftAvatar = ''; // 正在编辑的角色头像（dataURL）
+// 正在编辑的角色「自带世界书」开关。跟头像一样是草稿：改动先留在这里，
+// 保存时才写回角色卡 —— 这样切换开关能立刻反映到界面上。
+let charDraftWbEnabled = true;
 // 「新建角色」做出来的草稿：它先只活在编辑器里，不进任何列表、也不写磁盘，
 // 点了「保存角色」才真正被创建。关掉编辑器就等于放弃这次新建。
 let charDraft = null; // { character, scope, bookId }
@@ -5262,11 +5265,19 @@ function bindEvents() {
   // 批量粘贴：一行一项，省得一条条手打
   el.c.btnAttrPaste.addEventListener('click', () => toggleAttrPaste());
 
-  // 自带世界书的开关：切一下就立刻刷新下面的说明，让人马上知道现在什么行为
+  // 自带世界书的开关：先更新草稿，再按草稿刷新说明文字。
+  // 注意不能直接读 editorCharacterById —— 那时角色卡上还是旧值（还没保存），
+  // 结果就是「点了开关但说明没变」。
   el.c.wbEnabled.addEventListener('change', () => {
+    charDraftWbEnabled = el.c.wbEnabled.checked;
     const character = editorCharacterById(editingCharacterId);
-    if (character) renderCharWorldbookBox({ ...character, worldbookEnabled: el.c.wbEnabled.checked });
+    if (character) {
+      updateCharWorldbookHint({ ...character, worldbookEnabled: charDraftWbEnabled });
+    }
   });
+
+  // 「＋ 绑定」：挑一本世界书加到这个角色上
+  el.c.wbAddBtn.addEventListener('click', openWorldbookPicker);
   el.c.btnAttrPasteApply.addEventListener('click', applyAttrPaste);
 
   el.btnDelChar.addEventListener('click', deleteCharacter);
@@ -6227,7 +6238,10 @@ function fillCharForm(character) {
   charDraftAvatar = character.avatar || '';
   renderCharAvatar();
 
-  // 角色自带的世界书：没有就不显示这块，免得表单里多一个用不上的开关
+  // 开关的草稿要从这张卡的当前值起算（老数据没这个字段 = 开）
+  charDraftWbEnabled = character.worldbookEnabled !== false;
+
+  // 角色自带的世界书：清单 + 绑定按钮 + 开关
   renderCharWorldbookBox(character);
 
   // 属性：复制一份当草稿，保存时才写回角色卡
@@ -6240,27 +6254,223 @@ function fillCharForm(character) {
 }
 
 /** 角色自带世界书那一块：没有绑书就整块藏起来 */
+// 角色编辑器里「给角色绑世界书」那个浮层（自己起一个，不复用世界书页的选择器）
+let worldbookPickerEl = null;
+
+/**
+ * 角色自带世界书那一块。
+ *
+ * 这块**始终显示**（以前是「有绑定才显示」，结果没绑定过的角色
+ * 根本找不到入口加书）。没绑定时列出空状态提示，开关和说明照常给。
+ */
 function renderCharWorldbookBox(character) {
+  if (!character) return;
+
   const ids = character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
   const books = ids.map((id) => worldbookById(id)).filter(Boolean);
+  // 开关的当前值以草稿为准（用户可能刚切过还没保存）
+  const enabled = charDraftWbEnabled;
+
+  // --- 已绑的清单 ---
+  el.c.wbList.innerHTML = '';
 
   if (!books.length) {
-    el.c.wbBox.classList.add('hidden');
-    el.c.wbEnabled.checked = true;
+    const empty = document.createElement('p');
+    empty.className = 'field-help cwb-empty';
+    empty.textContent =
+      '还没有绑定。点「＋ 绑定」从世界书库里挑一本 —— 单独跟这个角色聊天时会带上它。';
+    el.c.wbList.appendChild(empty);
+  } else {
+    for (const book of books) {
+      const row = document.createElement('div');
+      row.className = 'cwb-row';
+
+      const name = document.createElement('span');
+      name.className = 'cwb-row-name';
+      name.textContent = book.name;
+      name.title = book.name;
+
+      const count = document.createElement('span');
+      count.className = 'cwb-row-count';
+      const n = Array.isArray(book.entries) ? book.entries.length : 0;
+      count.textContent = `${n} 条`;
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'cwb-row-del';
+      del.title = '解绑（不会删掉世界书本身）';
+      del.setAttribute('aria-label', `解绑 ${book.name}`);
+      del.textContent = '✕';
+      del.addEventListener('click', () => unbindWorldbookFromCharacter(book.id));
+
+      row.append(name, count, del);
+      el.c.wbList.appendChild(row);
+    }
+  }
+
+  // --- 开关：没有绑定时藏起来（开着也没意义）---
+  const hasBooks = books.length > 0;
+  el.c.wbSwitch.classList.toggle('hidden', !hasBooks);
+  el.c.wbEnabled.checked = enabled;
+
+  if (!hasBooks) {
+    el.c.wbDesc.textContent = '';
+    el.c.wbHint.textContent =
+      '绑定之后，这张卡单独聊天会带上这本书的设定；被绑进某个世界当角色时不生效（那条会话有自己的世界观）。';
     return;
   }
 
-  el.c.wbBox.classList.remove('hidden');
-  // 老数据没有这个字段 —— 默认视为启用（导入即可用）
-  el.c.wbEnabled.checked = character.worldbookEnabled !== false;
-
   const names = books.map((b) => b.name).join('、');
-  const count = books.reduce((n, b) => n + (Array.isArray(b.entries) ? b.entries.length : 0), 0);
-  el.c.wbDesc.textContent = `这张卡自带 ${books.length} 本世界书（共 ${count} 条）：${names}`;
+  const total = books.reduce((sum, b) => sum + (Array.isArray(b.entries) ? b.entries.length : 0), 0);
+  el.c.wbDesc.textContent = `已绑 ${books.length} 本（共 ${total} 条）：${names}`;
 
-  el.c.wbHint.textContent = el.c.wbEnabled.checked
+  el.c.wbHint.textContent = enabled
     ? '现在生效。单独跟它聊天时会带上这些设定；但绑进某个世界当角色时不生效 —— 那条会话已经有自己的世界观了。'
-    : '已停用。无论单独聊天、还是绑进某个世界当角色，都不会带入这几本书 —— 这张卡保持干净。';
+    : '已停用。无论单独聊天、还是绑进某个世界当角色，都不会带入这几本书 —— 这张卡保持干净（绑定关系留着，随时能再打开）。';
+}
+
+/** 只刷新开关下面的说明文字（切换开关时用，不动清单） */
+function updateCharWorldbookHint(character) {
+  const books = (character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [])
+    .map((id) => worldbookById(id))
+    .filter(Boolean);
+  if (!books.length) return;
+
+  const enabled = character.worldbookEnabled !== false;
+  const names = books.map((b) => b.name).join('、');
+  const total = books.reduce((sum, b) => sum + (Array.isArray(b.entries) ? b.entries.length : 0), 0);
+  el.c.wbDesc.textContent = `已绑 ${books.length} 本（共 ${total} 条）：${names}`;
+
+  el.c.wbHint.textContent = enabled
+    ? '现在生效。单独跟它聊天时会带上这些设定；但绑进某个世界当角色时不生效 —— 那条会话已经有自己的世界观了。'
+    : '已停用。无论单独聊天、还是绑进某个世界当角色，都不会带入这几本书 —— 这张卡保持干净（绑定关系留着，随时能再打开）。';
+}
+async function bindWorldbookToCharacter(bookId) {
+  const character = editorCharacterById(editingCharacterId);
+  if (!character) return;
+
+  const ids = Array.isArray(character.worldbookIds) ? [...character.worldbookIds] : [];
+  if (ids.includes(bookId)) {
+    showToast('这本已经绑上了');
+    return;
+  }
+
+  ids.push(bookId);
+  character.worldbookIds = ids;
+  // 刚绑上就默认启用 —— 绑了却因为开关关着不生效，会让人以为是 bug
+  if (character.worldbookEnabled === false && ids.length === 1) {
+    character.worldbookEnabled = true;
+  }
+  character.updatedAt = now();
+
+  renderCharWorldbookBox(character);
+  await persistLibrary();
+  showToast('已绑定世界书');
+}
+
+/** 解绑（不删世界书本身） */
+async function unbindWorldbookFromCharacter(bookId) {
+  const character = editorCharacterById(editingCharacterId);
+  if (!character) return;
+
+  const book = worldbookById(bookId);
+  character.worldbookIds = (character.worldbookIds || []).filter((id) => id !== bookId);
+  character.updatedAt = now();
+
+  renderCharWorldbookBox(character);
+  await persistLibrary();
+  showToast(book ? `已解绑「${book.name}」（世界书还在库里）` : '已解绑');
+}
+
+/**
+ * 点「＋ 绑定」：列出还没绑的世界书让用户挑。
+ *
+ * 自己起一个轻量浮层，而不是复用世界书页那个角色选择器 ——
+ * 那个是「角色 → 加进世界书」，方向相反，而且绑了一堆模块级状态，
+ * 硬套进来会互相干扰。
+ */
+function openWorldbookPicker() {
+  const character = editorCharacterById(editingCharacterId);
+  if (!character) return;
+
+  const bound = new Set(Array.isArray(character.worldbookIds) ? character.worldbookIds : []);
+  const all = worldbooks();
+  const candidates = all.filter((b) => !bound.has(b.id));
+
+  if (!all.length) {
+    showToast('世界书库还是空的 —— 先去「世界书」页新建或导入一本', 'error');
+    return;
+  }
+  if (!candidates.length) {
+    showToast('所有世界书都已经绑上了');
+    return;
+  }
+
+  closeWorldbookPicker();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cwb-picker';
+
+  const card = document.createElement('div');
+  card.className = 'cwb-picker-card';
+
+  const head = document.createElement('div');
+  head.className = 'cwb-picker-head';
+  const title = document.createElement('span');
+  title.className = 'cwb-picker-title';
+  title.textContent = `给「${character.name}」绑定世界书`;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'icon-btn icon-btn-sm';
+  close.title = '关闭';
+  close.setAttribute('aria-label', '关闭');
+  close.textContent = '✕';
+  close.addEventListener('click', closeWorldbookPicker);
+  head.append(title, close);
+
+  const list = document.createElement('div');
+  list.className = 'cwb-picker-list';
+
+  for (const book of candidates) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'cwb-picker-row';
+
+    const name = document.createElement('span');
+    name.className = 'cwb-picker-name';
+    name.textContent = book.name;
+
+    const meta = document.createElement('span');
+    meta.className = 'cwb-picker-meta';
+    const n = Array.isArray(book.entries) ? book.entries.length : 0;
+    const chars = Array.isArray(book.characters) ? book.characters.length : 0;
+    meta.textContent = chars ? `${n} 条 · ${chars} 个角色` : `${n} 条`;
+
+    row.append(name, meta);
+    row.addEventListener('click', () => {
+      closeWorldbookPicker();
+      bindWorldbookToCharacter(book.id);
+    });
+    list.appendChild(row);
+  }
+
+  card.append(head, list);
+  overlay.appendChild(card);
+
+  // 点浮层空白处关掉
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeWorldbookPicker();
+  });
+
+  document.body.appendChild(overlay);
+  worldbookPickerEl = overlay;
+}
+
+function closeWorldbookPicker() {
+  if (worldbookPickerEl) {
+    worldbookPickerEl.remove();
+    worldbookPickerEl = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6582,10 +6792,10 @@ function stashCharForm() {
     .map((a) => ({ name: a.name.trim().slice(0, 24), value: String(a.value || '').slice(0, 200) }))
     .slice(0, MAX_PANEL_FIELDS);
   character.avatar = charDraftAvatar;
-  // 角色自带世界书的开关。整块藏起来时（这张卡没有绑书）不写这个字段，
+  // 角色自带世界书的开关（草稿）。没有绑书时不写这个字段，
   // 免得给没有书的角色平白加一个属性。
-  if (!el.c.wbBox.classList.contains('hidden')) {
-    character.worldbookEnabled = el.c.wbEnabled.checked;
+  if ((character.worldbookIds || []).length) {
+    character.worldbookEnabled = charDraftWbEnabled;
   }
   character.updatedAt = now();
 }

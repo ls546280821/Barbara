@@ -79,6 +79,20 @@ function setValue(target, value) {
 }
 
 /**
+ * 勾选/取消勾选一个 checkbox。
+ *
+ * 不能用 setValue：checkbox 的状态在 .checked 上，.value 设了也没用；
+ * 而且它只派发 input 事件，而这类开关监听的是 change。
+ */
+function setChecked(target, checked) {
+  const node = typeof target === 'string' ? $(target) : target;
+  if (!node) throw new Error(`找不到勾选框：${target}`);
+  node.checked = !!checked;
+  node.dispatchEvent(new Event('change', { bubbles: true }));
+  return node;
+}
+
+/**
  * 给下拉补一个 option 再选中它。
  *
  * 直接用 setValue 选一个「下拉里还没有的值」是不行的 ——
@@ -1456,6 +1470,84 @@ await scenario('帮我想想（给几个下一步）', async () => {
     await sleep(150);
     check('点 ✕ 能收起建议条', !shown('#suggest-strip'));
     check('收起后列表也清空', byId('suggest-list').children.length === 0);
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  角色自带的世界书：绑定 / 解绑 / 开关 / 存盘
+// ---------------------------------------------------------------------------
+await scenario('角色：绑定自带的世界书', async () => {
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click('#btn-new-char');
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+
+  const NAME = '自带世界书测试';
+  setValue('#c-name', NAME);
+  await sleep(100);
+
+  // 没绑定时：这一块也要显示（以前是「有绑定才显示」，导致找不到入口加书）
+  check('没绑定时这块也显示出来', shown('#c-worldbook-box'));
+  check('没绑定时有「＋ 绑定」按钮', shown('#c-wb-add-btn'));
+  check('没绑定时清单是空状态提示', $$('#c-wb-list .cwb-row').length === 0);
+  check('没绑定时开关藏起来（开着也没意义）', !shown('#c-wb-switch'));
+  check('空状态给了引导文字', String(byId('c-wb-list').textContent || '').includes('点「＋ 绑定」'));
+
+  // 点「＋ 绑定」→ 浮层列出可选的库
+  click('#c-wb-add-btn');
+  await waitFor('选择浮层出现', () => !!$('.cwb-picker'));
+  const options = $$('.cwb-picker .cwb-picker-row');
+  check('浮层列出了可选世界书', options.length > 0, `${options.length} 个`);
+  check('浮层里有冒烟测试世界',
+    options.some((o) => String(o.textContent || '').includes('冒烟测试世界')),
+    JSON.stringify(options.map((o) => o.textContent.trim())));
+
+  // 选一本 → 绑定
+  const target = options.find((o) => String(o.textContent || '').includes('冒烟测试世界'));
+  click(target);
+  await waitFor('浮层关闭', () => !$('.cwb-picker'));
+  await waitFor('清单里出现这本', () => $$('#c-wb-list .cwb-row').length === 1);
+  await sleep(150);
+
+  check('绑定后清单里有一行', $$('#c-wb-list .cwb-row').length === 1);
+  check('行里是那本书的名字',
+    String($$('#c-wb-list .cwb-row')[0].textContent || '').includes('冒烟测试世界'));
+  check('绑定后开关出现了', shown('#c-wb-switch'));
+  check('绑定后开关默认是开的', byId('c-wb-enabled').checked === true);
+  check('说明文字提到「单独聊天会带上」',
+    String(byId('c-wb-hint').textContent || '').includes('单独跟它聊天时会带上'),
+    String(byId('c-wb-hint').textContent || '').slice(0, 60));
+
+  // 关掉开关 → 说明跟着变
+  setChecked('#c-wb-enabled', false);
+  await sleep(150);
+  check('关掉开关后说明改成「已停用」',
+    String(byId('c-wb-hint').textContent || '').includes('已停用'),
+    String(byId('c-wb-hint').textContent || '').slice(0, 60));
+
+  // 存盘 → 两个字段都要落盘（归一化白名单最容易漏）
+  setChecked('#c-wb-enabled', true);
+  await sleep(100);
+  click('#btn-save-char');
+  await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色', 8000);
+  await sleep(200);
+
+  const saved = (await savedCharacters()).find((c) => c.name === NAME);
+  check('角色存下来了', !!saved);
+  check('worldbookIds 落盘了（没被归一化丢掉）',
+    !!saved && Array.isArray(saved.worldbookIds) && saved.worldbookIds.length === 1,
+    JSON.stringify(saved && saved.worldbookIds));
+  check('worldbookEnabled 落盘了', !!saved && saved.worldbookEnabled === true,
+    JSON.stringify(saved && saved.worldbookEnabled));
+
+  // 解绑 → 清单回到空状态
+  if (saved && Array.isArray(saved.worldbookIds) && saved.worldbookIds.length) {
+    click($$('#c-wb-list .cwb-row')[0].querySelector('.cwb-row-del'));
+    await waitFor('解绑后清单空掉', () => $$('#c-wb-list .cwb-row').length === 0, 8000);
+    await sleep(150);
+    check('解绑后开关又藏起来', !shown('#c-wb-switch'));
+    check('解绑后回到空状态提示',
+      String(byId('c-wb-list').textContent || '').includes('点「＋ 绑定」'));
   }
 });
 

@@ -2669,6 +2669,143 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   background: var(--accent-soft);
 }
 
+/* ------------------------------ 角色自带的世界书 ------------------------------ */
+
+/* 角色编辑器里那一块：清单 + 绑定按钮 + 开关 */
+.char-worldbook-box {
+  margin: 4px 0 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-side);
+}
+
+.cwb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.cwb-head .field-label { padding-top: 0; }
+
+.cwb-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+.cwb-empty { margin: 0; }
+
+.cwb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  min-width: 0;
+}
+
+.cwb-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.cwb-row-count { flex: 0 0 auto; font-size: 11px; color: var(--text-faint); }
+
+.cwb-row-del {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 5px;
+}
+
+.cwb-row-del:hover { color: var(--danger-text, #d9534f); background: var(--bg-input); }
+
+/* 选择世界书的浮层 */
+.cwb-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 16, 24, 0.45);
+}
+
+.cwb-picker-card {
+  width: 100%;
+  max-width: 420px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-lg);
+}
+
+.cwb-picker-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.cwb-picker-title { font-size: 13px; color: var(--text); }
+
+.cwb-picker-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 0;
+}
+
+.cwb-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.cwb-picker-row:hover { border-color: rgba(74, 134, 232, 0.45); background: var(--accent-soft); }
+
+.cwb-picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cwb-picker-meta { flex: 0 0 auto; font-size: 11px; color: var(--text-faint); }
+
 @media (prefers-reduced-motion: reduce) {
   .modal, .modal-card { animation: none; }
   .btn, .icon-btn, .check, .check-title,

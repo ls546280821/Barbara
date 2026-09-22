@@ -149,8 +149,11 @@ export const el = {
     attrList: $('c-attr-list'),
     btnAttrPaste: $('btn-attr-paste'),
     attrPaste: $('c-attr-paste'),
-    // 角色自带的世界书：开关 + 说明
+    // 角色自带的世界书：清单 + 绑定按钮 + 开关
     wbBox: $('c-worldbook-box'),
+    wbList: $('c-wb-list'),
+    wbAddBtn: $('c-wb-add-btn'),
+    wbSwitch: $('c-wb-switch'),
     wbEnabled: $('c-wb-enabled'),
     wbDesc: $('c-wb-desc'),
     wbHint: $('c-wb-hint'),
