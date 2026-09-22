@@ -374,6 +374,9 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   setValue(numInputs[0], '0');
   setValue(numInputs[1], '100');
   setValue(meterRow.parentElement.querySelector('.attr-more .attr-hint'), '按剧情合理增减，单轮不超过 10');
+  // 分组：这张卡里「好感度」归到「关系」组
+  check('配置区里有分组输入框', !!meterRow.parentElement.querySelector('.attr-more .attr-group'));
+  setValue(meterRow.parentElement.querySelector('.attr-more .attr-group'), '关系');
 
   // 「更多」能收起，收起来之后配置不丢（草稿还在）
   const moreBtn = meterRow.querySelector('.attr-more-btn');
@@ -409,6 +412,11 @@ await scenario('属性：从角色卡种到状态面板', async () => {
     JSON.stringify(mine && mine.attributes[2])
   );
   check(
+    '分组也落盘了',
+    !!mine && mine.attributes[2].group === '关系',
+    JSON.stringify(mine && mine.attributes[2] && mine.attributes[2].group)
+  );
+  check(
     '界面自己的临时状态没有写进角色卡（_moreOpen）',
     !!mine && !('_moreOpen' in mine.attributes[2]),
     JSON.stringify(mine && Object.keys(mine.attributes[2] || {}))
@@ -433,6 +441,34 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   const panelNames = panelRows.map((r) => r.querySelector('.panel-name').textContent);
   check('面板里出现了角色属性', panelNames.includes('金币') && panelNames.includes('上衣'), JSON.stringify(panelNames));
   check('带范围的数值属性也在面板里', panelNames.includes('好感度'), JSON.stringify(panelNames));
+
+  // 分组：填了分组的字段，面板上会多一个分组标题行
+  const groupTitles = $$('#panel-fields .panel-group-title').map((n) => n.textContent);
+  check('面板上出现了分组标题', groupTitles.includes('关系'), JSON.stringify(groupTitles));
+  check('没分组的字段不额外加标题（只有 1 个分组头）', groupTitles.length === 1, JSON.stringify(groupTitles));
+  {
+    const kids = Array.from(byId('panel-fields').children).map((n) =>
+      n.classList.contains('panel-group-title') ? `#${n.textContent}` : n.querySelector('.panel-name').textContent
+    );
+    const gi = kids.indexOf('#关系');
+    const fi = kids.indexOf('好感度');
+    check('分组标题排在它那一组的字段前面', gi >= 0 && fi > gi, JSON.stringify(kids));
+  }
+
+  // 数值字段的「/100」被拆成后缀显示，输入框里只剩分子
+  {
+    const favorRow = panelRows.find((r) => r.querySelector('.panel-name').textContent === '好感度');
+    check(
+      '数值字段显示成「分子 + /满值后缀」',
+      !!favorRow && !!favorRow.querySelector('.panel-unit') && favorRow.querySelector('.panel-unit').textContent === '/100',
+      favorRow ? `unit=${favorRow.querySelector('.panel-unit') && favorRow.querySelector('.panel-unit').textContent} value=${favorRow.querySelector('.panel-value').value}` : '没找到'
+    );
+    check(
+      '输入框里只有分子（分母挪到后缀了）',
+      !!favorRow && favorRow.querySelector('.panel-value').value === '20',
+      favorRow ? favorRow.querySelector('.panel-value').value : '没找到'
+    );
+  }
 
   const goldRow = panelRows.find((r) => r.querySelector('.panel-name').textContent === '金币');
   check(
@@ -472,14 +508,16 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   check('面板里有「好感度」输入框', !!favorInput);
 
   if (favorInput) {
-    setValue(favorInput, '150/100');
+    // 输入框里只有分子（分母是外面的 /100 后缀），所以这里填「150」——
+    // 保存时要把分母拼回成 150/100，再按范围夹成 100/100。
+    setValue(favorInput, '150');
     favorInput.dispatchEvent(new Event('blur', { bubbles: true }));
     await sleep(250);
 
     const convos = await window.barbara.getConversations();
     const active = convos.conversations.find((c) => c.id === convos.activeId);
     check(
-      '面板：越界值被夹回上限（150/100 → 100/100）',
+      '面板：只填分子也保留分母，越界值被夹回上限（150 → 100/100）',
       !!active && active.panel && active.panel['好感度'] === '100/100',
       JSON.stringify(active && active.panel)
     );
@@ -488,15 +526,20 @@ await scenario('属性：从角色卡种到状态面板', async () => {
       !!active && !!active.panelDefs && !!active.panelDefs['好感度'] && active.panelDefs['好感度'].max === 100,
       JSON.stringify(active && active.panelDefs)
     );
+    check(
+      '面板：分组也跟着定义存下来了',
+      !!active && !!active.panelDefs['好感度'] && active.panelDefs['好感度'].group === '关系',
+      JSON.stringify(active && active.panelDefs && active.panelDefs['好感度'])
+    );
 
     // 范围内、以及非数字的值不该被动
-    setValue(favorInput, '60/100');
+    setValue(favorInput, '60');
     favorInput.dispatchEvent(new Event('blur', { bubbles: true }));
     await sleep(250);
     const convos2 = await window.barbara.getConversations();
     const active2 = convos2.conversations.find((c) => c.id === convos2.activeId);
     check(
-      '面板：范围内的值不动（60/100 保持原样）',
+      '面板：范围内的值不动（60 → 60/100）',
       !!active2 && active2.panel['好感度'] === '60/100',
       JSON.stringify(active2 && active2.panel['好感度'])
     );

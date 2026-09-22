@@ -34,24 +34,56 @@ function cardAvatarToDataUrl(value) {
 }
 
 /**
+ * 官方互动模板 → 我们的分组名。
+ * 卡片数据里的 `template` 是个机器用的 id（status_bar），界面上该显示中文标题，
+ * 所以这里翻译一道；认不出来的 id（比如自定义面板 `panel_1`）走 panels 里的 title。
+ */
+const TEMPLATE_GROUP_LABELS = {
+  status_bar: '状态栏',
+  relationship: '关系',
+  inventory: '背包',
+  options: '剧情选项'
+};
+
+/** 卡片里 template id → 分组标题 */
+function statusTemplateGroupTitles(tpl) {
+  const map = new Map();
+  const panels = tpl && Array.isArray(tpl.panels) ? tpl.panels : [];
+  for (const panel of panels) {
+    if (!panel || typeof panel !== 'object') continue;
+    const id = String(panel.id || '').trim();
+    const title = String(panel.title || '').trim();
+    if (id && title) map.set(id, title);
+  }
+  for (const [id, label] of Object.entries(TEMPLATE_GROUP_LABELS)) {
+    if (!map.has(id)) map.set(id, label);
+  }
+  return map;
+}
+
+/**
  * 把「互动模板」那种字段定义转成角色属性。
  *
  * 形状对照（左边是某站点导出的卡，右边是我们内部认的）：
  *   { key:'favor', label:'好感度', type:'meter', min:0, max:100,
- *     initial:20, hint:'…' }
- *     → { name:'好感度', type:'meter', min:0, max:100, value:'20', hint:'…' }
+ *     initial:20, hint:'…', template:'relationship' }
+ *     → { name:'好感度', type:'meter', min:0, max:100, value:'20',
+ *         hint:'…', group:'关系' }
  *
  * 几处取舍：
  *   · 用 `label` 当字段名（那是给人看的、也是要注入给模型的），
  *     `key` 只是它内部的变量名；
  *   · 重名就加序号跳过 —— 面板字段是按名字认的，两个「自定义面板」
  *     会互相覆盖，不如退成「自定义面板 2」；
- *   · initial 是数组（列表型字段）时用「、」拼起来，因为面板值只能是字符串。
+ *   · initial 是数组（列表型字段）时用「、」拼起来，因为面板值只能是字符串；
+ *   · `template` 翻译成分组标题（status_bar → 状态栏），这样导入后
+ *     面板就是分好组的，而不是一长条。
  */
 function attributesFromStatusTemplate(tpl) {
   const fields = tpl && Array.isArray(tpl.fields) ? tpl.fields : null;
   if (!fields || !fields.length) return [];
 
+  const groupTitles = statusTemplateGroupTitles(tpl);
   const out = [];
   const used = new Set();
 
@@ -79,6 +111,8 @@ function attributesFromStatusTemplate(tpl) {
     if (raw.min !== undefined) field.min = raw.min;
     if (raw.max !== undefined) field.max = raw.max;
     if (raw.hint) field.hint = raw.hint;
+    const group = groupTitles.get(String(raw.template || '').trim());
+    if (group) field.group = group;
 
     out.push(field);
   }

@@ -37,8 +37,14 @@ const { importFiles } = require('../main/import-files.js');
 const { parseImportFile } = require('../main/card-import.js');
 // 世界书落盘归一化：和 main.js 的 worldbooks:save 跑的是同一份
 const { createWorldbookNormalizer } = require('../main/worldbook-store.js');
-// 面板字段的类型/范围/变化规则：主进程和渲染层共用的那一份
-const { clampFieldValue, normalizePanelField, normalizePanelFields, describePanelField } = require('../main/panel-fields.js');
+// 面板字段的类型/范围/变化规则/分组：主进程和渲染层共用的那一份
+const {
+  clampFieldValue,
+  normalizePanelField,
+  normalizePanelFields,
+  groupPanelFields,
+  describePanelField
+} = require('../main/panel-fields.js');
 // 语义检索的向量工具也用真实现（编解码 / 余弦 / topK 都是它）
 const {
   hashText,
@@ -618,6 +624,27 @@ function probeInjection(result) {
     detail: warnOk ? '' : '没找到那句提醒'
   });
 
+  // 分组：注入给模型的状态栏里要有分组小标题，而且**不能**用【】包，
+  // 否则会被自己的面板解析器当成一个名叫「关系」的字段。
+  const groupBlob = rangeBlob || '';
+  const hasHeader = groupBlob.includes('—— 关系 ——');
+  result.results.push({
+    name: '属性：分组小标题被注入给模型',
+    pass: hasHeader,
+    detail: hasHeader ? '' : `没找到「—— 关系 ——」：${JSON.stringify(groupBlob.slice(groupBlob.indexOf('[当前状态]'), groupBlob.indexOf('[当前状态]') + 300))}`
+  });
+  result.results.push({
+    name: '属性：分组小标题刻意不用【】（否则会被当成字段）',
+    pass: hasHeader && !groupBlob.includes('【关系】'),
+    detail: hasHeader && !groupBlob.includes('【关系】') ? '' : '注入里出现了【关系】形状的分组标题'
+  });
+  const groupNote = groupBlob.includes('不要当成字段输出');
+  result.results.push({
+    name: '属性：注入里交代了小标题不要当字段输出',
+    pass: groupNote,
+    detail: groupNote ? '' : '没找到那句交代'
+  });
+
   const playerOk = blobs.some((b) => b.includes('【玩家角色：改过的名字】'));
   result.results.push({
     name: '进入世界：注入的是你选/改过的玩家角色',
@@ -1140,6 +1167,9 @@ function probeImport(result) {
     const favor = attrs.find((a) => a.name === '好感度');
     const stage = attrs.find((a) => a.name === '关系阶段');
     const bag = attrs.find((a) => a.name === '背包');
+    // 卡里的 template id 要翻译成分组标题（status_bar → 状态栏）
+    const groupOf = (n) => (attrs.find((a) => a.name === n) || {}).group;
+    const groups = [...new Set(attrs.map((a) => a.group).filter(Boolean))].sort();
     tplOk =
       attrs.length === 7 &&
       !!favor &&
@@ -1154,9 +1184,16 @@ function probeImport(result) {
       // 列表型字段的初始值是个数组，要拍平成字符串
       !!bag &&
       bag.type === 'list' &&
-      bag.value === '衣服';
+      bag.value === '衣服' &&
+      // 分组：官方模板翻译成中文标题，自定义面板用卡里 panels 的 title
+      groupOf('时间') === '状态栏' &&
+      groupOf('好感度') === '关系' &&
+      groupOf('关系阶段') === '关系' &&
+      groupOf('背包') === '背包' &&
+      groupOf('自定义面板') === '自定义面板' &&
+      groups.join(',') === '关系,背包,状态栏,自定义面板'.split(',').sort().join(',');
     tplDetail =
-      `属性 ${attrs.length} 个：${JSON.stringify(attrs.map((a) => `${a.name}/${a.type}`))}` +
+      `属性 ${attrs.length} 个：${JSON.stringify(attrs.map((a) => `${a.name}/${a.type}/${a.group || '无组'}`))}` +
       (favor ? ` 好感度=${JSON.stringify(favor)}` : ' 没有好感度');
   } catch (err) {
     tplDetail = '读夹具失败：' + ((err && err.message) || err);
@@ -1252,6 +1289,36 @@ function probePanelFields(result) {
     describePanelField({ type: 'list' }));
   push('面板描述：纯文本字段没有多余说明', describePanelField({ type: 'text' }) === '',
     describePanelField({ type: 'text' }));
+
+  // --- 分组（命名面板）---
+  const grouped = normalizePanelFields([
+    { name: '时间', group: '状态栏' },
+    { name: '好感度', group: '关系', type: 'meter', min: 0, max: 100 },
+    { name: '零散' },
+    { name: '背包', group: '背包' }
+  ]);
+  push('面板分组：group 被留下来', !!grouped[0].group && grouped[0].group === '状态栏', JSON.stringify(grouped[0]));
+  push('面板分组：没写 group 的字段就是没分组', !('group' in grouped[2]), JSON.stringify(grouped[2]));
+  push('面板分组：纯空白的分组名当没有', !('group' in normalizePanelField({ name: 'x', group: '   ' })));
+
+  const buckets = groupPanelFields(grouped);
+  push(
+    '面板分组：按第一次出现的顺序分组、顺序保留',
+    buckets.map((b) => b.id).join(',') === '状态栏,关系,背包,',
+    JSON.stringify(buckets.map((b) => b.id))
+  );
+  push(
+    '面板分组：没分组的排最后',
+    buckets[buckets.length - 1].id === '' && buckets[buckets.length - 1].fields.length === 1,
+    JSON.stringify(buckets.map((b) => ({ id: b.id, n: b.fields.length })))
+  );
+  push(
+    '面板分组：每个桶里的字段对得上',
+    buckets[0].fields[0].name === '时间' && buckets[1].fields[0].name === '好感度' && buckets[2].fields[0].name === '背包',
+    JSON.stringify(buckets.map((b) => b.fields.map((f) => f.name)))
+  );
+  push('面板分组：全都没分组时只有一个空桶', groupPanelFields([{ name: 'a' }, { name: 'b' }]).length === 1);
+  push('面板分组：脏输入不崩', groupPanelFields(null).length === 0 && groupPanelFields([null, undefined]).length === 0);
 }
 
 /**

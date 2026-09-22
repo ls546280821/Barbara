@@ -31,6 +31,8 @@ const MAX_FIELD_NAME = 24;
 const MAX_FIELD_VALUE = 500;
 const MAX_FIELD_HINT = 200;
 const MAX_FIELDS = 120;
+// 分组名（面板标题）的长度上限。它是给人看的标题，不用太长。
+const MAX_GROUP_TITLE = 24;
 
 const FIELD_TYPES = ['text', 'meter', 'list'];
 
@@ -134,7 +136,42 @@ function normalizePanelField(raw) {
   const hint = String(raw.hint == null ? '' : raw.hint).trim().slice(0, MAX_FIELD_HINT);
   if (hint) field.hint = hint;
 
+  // 分组：字段属于哪个命名面板。空 = 不分组（就是以前那种扁平清单）。
+  const group = String(raw.group == null ? '' : raw.group).trim().slice(0, MAX_GROUP_TITLE);
+  if (group) field.group = group;
+
   return field;
+}
+
+/**
+ * 把字段按分组分桶，顺序保留。
+ *
+ * 返回 [{ id, title, fields }]。`id` 空串那一桶是「没分组的」，永远排在最后 ——
+ * 不然零散字段会插在命名面板中间，看着像掉出来了。
+ *
+ * 分组是按**字段第一次出现的顺序**排的（不是字母序），这样界面上组的次序
+ * 跟着你填的顺序走，符合直觉。
+ */
+function groupPanelFields(fields) {
+  const list = Array.isArray(fields) ? fields : [];
+  const order = [];
+  const buckets = new Map();
+
+  for (const field of list) {
+    if (!field) continue;
+    const id = typeof field.group === 'string' ? field.group : '';
+    if (!buckets.has(id)) {
+      buckets.set(id, []);
+      order.push(id);
+    }
+    buckets.get(id).push(field);
+  }
+
+  // 没分组的排到最后
+  const named = order.filter((id) => id !== '');
+  if (order.includes('')) named.push('');
+
+  return named.map((id) => ({ id, title: id, fields: buckets.get(id) || [] }));
 }
 
 /** 归一化一组字段定义 */
@@ -179,11 +216,14 @@ const PanelFields = {
   MAX_FIELD_VALUE,
   MAX_FIELD_HINT,
   MAX_FIELDS,
+  MAX_GROUP_TITLE,
   parseNumericValue,
   clampNumber,
+  trimNumber,
   clampFieldValue,
   normalizePanelField,
   normalizePanelFields,
+  groupPanelFields,
   describePanelField
 };
 

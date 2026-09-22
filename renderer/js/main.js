@@ -40,7 +40,15 @@ if (!panelFieldsApi) {
   // 早点炸出来，好过后面一大片「范围莫名其妙不生效」。
   throw new Error('main/panel-fields.js 没加载 —— 检查 renderer/index.html 里的 script 标签');
 }
-const { clampFieldValue, normalizePanelField, normalizePanelFields, describePanelField } = panelFieldsApi;
+const {
+  clampFieldValue,
+  normalizePanelField,
+  normalizePanelFields,
+  groupPanelFields,
+  describePanelField,
+  parseNumericValue,
+  trimNumber
+} = panelFieldsApi;
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -1231,7 +1239,8 @@ function normalizePanelDefs(value) {
       type: def.type,
       ...(typeof def.min === 'number' ? { min: def.min } : {}),
       ...(typeof def.max === 'number' ? { max: def.max } : {}),
-      ...(def.hint ? { hint: def.hint } : {})
+      ...(def.hint ? { hint: def.hint } : {}),
+      ...(def.group ? { group: def.group } : {})
     };
     count += 1;
   }
@@ -1315,12 +1324,39 @@ function setPanelField(convo, name, value) {
   const fields = [...convoPanelFields(convo)];
   if (!fields.includes(name)) fields.push(name);
   convo.panelFields = fields.slice(0, MAX_PANEL_FIELDS);
-  // 手填的值也夹一下 —— 用户手滑写 150、模型输出越界，走的是同一个入口，
-  // 只在 syncConvoPanel 里夹的话这两条路都漏。
-  const text = String(value == null ? '' : value).slice(0, 500);
-  convo.panel = { ...convoPanel(convo), [name]: clampPanelValue(convo, name, text) };
+
+  const prev = String(convoPanel(convo)[name] == null ? '' : convoPanel(convo)[name]);
+  const text = String(value == null ? '' : value).trim().slice(0, 500);
+  // 界面上「/100」是拆成后缀单独显示的，输入框里只有分子。存的时候把分母拼回去，
+  // 否则「60/100」改一下变成「60」，分母就永久丢了。
+  const merged = mergeMeterValue(text, prev, convoPanelDef(convo, name));
+
+  convo.panel = { ...convoPanel(convo), [name]: clampPanelValue(convo, name, merged) };
   convo.updatedAt = now();
   persistConversations(0);
+}
+
+/**
+ * 把「只有分子」的值和分母拼回「60/100」。
+ *
+ * 为什么需要它：
+ *   · 界面上「/100」是拆成后缀单独显示的，输入框里只有分子；
+ *   · 卡片里的数值字段 initial 常常是个裸数字（20），而卡的文字和历史里写的是
+ *     「20/100」—— 不统一的话，面板里是个光秃秃的 20，夹取也拿不到满值。
+ * 所以：有范围上限的数值字段一律存成「分子/满值」这一种格式，两个入口
+ * （种初始值、手动编辑）都走这里，格式就不会两样。
+ *
+ * 只对「数值型 + 有 max」的字段生效，别的字段原样返回。
+ */
+function mergeMeterValue(value, prev, def) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text || !def || def.type !== 'meter' || typeof def.max !== 'number') return text;
+  if (text.includes('/')) return text;
+
+  // 分母优先用旧值里的（可能和 max 不同，比如按比例的分数字段），没有就用 max
+  const m = String(prev == null ? '' : prev).match(/^[-+]?\d+(?:\.\d+)?\s*\/\s*([-+]?\d+(?:\.\d+)?)$/);
+  const total = m ? m[1] : trimNumber(def.max);
+  return `${text}/${total}`;
 }
 
 /**
@@ -1341,22 +1377,53 @@ function panelFieldLegend(convo, fields) {
   return lines;
 }
 
+/**
+ * 分组标题在注入文本里的写法：**刻意不用【】**。
+ *
+ * 用「【关系】：」的话会被自己的面板解析器当成一个名叫「关系」的字段
+ * （PANEL_LINE_RE 认的就是这个形状），于是模型照着输出、下一轮就多出
+ * 一个垃圾字段。用「—— 关系 ——」这种破折号包法就不会误匹配。
+ */
+function panelGroupHeader(title) {
+  return `—— ${title} ——`;
+}
+
 /** 面板拼成注入块；没有面板就返回空串 */
 function formatPanelForPrompt(convo) {
   const fields = convoPanelFields(convo);
   if (!fields.length) return '';
 
   const panel = convoPanel(convo);
+
+  // 按分组拼。分组的字段顺序由 groupPanelFields 保序，没分组的排最后。
+  const groups = groupPanelFields(
+    fields.map((name) => ({ name, group: (convoPanelDef(convo, name) || {}).group || '' }))
+  );
+
   const lines = [];
-  for (const name of fields) {
-    const value = panel[name];
-    if (value === undefined || value === '') continue;
-    lines.push(`【${name}】：${value}`);
+  let groupCount = 0;
+  for (const bucket of groups) {
+    const filled = bucket.fields.filter((f) => {
+      const v = panel[f.name];
+      return v !== undefined && v !== '';
+    });
+    if (!filled.length) continue;
+
+    if (bucket.id) {
+      groupCount += 1;
+      lines.push(panelGroupHeader(bucket.id));
+    }
+    for (const f of filled) lines.push(`【${f.name}】：${panel[f.name]}`);
   }
 
+  const grouped = groupCount > 0;
   const legend = panelFieldLegend(convo, fields);
   const legendBlock = legend.length
     ? '\n\n字段的取值范围与变化规则（务必遵守，数值超出范围会被程序拉回）：\n' + legend.join('\n')
+    : '';
+  // 有分组时交代一句 —— 否则模型看不懂那些破折号标题是干什么的
+  const groupNote = grouped
+    ? '\n（「—— 组名 ——」是状态分组的小标题，照抄即可，不要当成字段输出。）'
     : '';
 
   // 一个值都还没有 = 刚用角色卡的属性模板开的局。
@@ -1368,6 +1435,7 @@ function formatPanelForPrompt(convo) {
       `本局需要维护这些状态字段：${fields.join('、')}\n` +
       '请在每次回复的末尾，用「【字段】：值」的格式把它们完整输出一遍' +
       '（还不知道的写「未知」）；之后每轮照抄并更新，不要凭空改动已有数值。' +
+      groupNote +
       legendBlock
     );
   }
@@ -1375,7 +1443,9 @@ function formatPanelForPrompt(convo) {
   return (
     '[当前状态]\n' +
     '这是本局当前的权威状态，请以它为准，不要自行改动历史数值。\n' +
-    '每次回复末尾按同样的格式输出更新后的完整状态栏；没有变化的字段照抄。\n\n' +
+    '每次回复末尾按同样的格式输出更新后的完整状态栏；没有变化的字段照抄。' +
+    groupNote +
+    '\n\n' +
     lines.join('\n') +
     legendBlock
   );
@@ -1644,32 +1714,56 @@ function renderPanel() {
 
   clear(el.panelFields);
 
-  for (const name of fields) {
-    const input = h('input', {
-      type: 'text',
-      class: 'panel-value',
-      dataset: { field: name },
-      value: panel[name] || '',
-      spellcheck: 'false',
-      'aria-label': name
-    });
-    attachPanelEditor(convo, name, input);
+  // 按分组铺：有名字的组各给一个标题行，没分组的字段直接铺（不额外加标题）——
+  // 老会话没有分组，看到的和以前一模一样。
+  const buckets = groupPanelFields(
+    fields.map((name) => ({ name, group: (convoPanelDef(convo, name) || {}).group || '' }))
+  );
 
-    el.panelFields.appendChild(
-      h(
-        'div',
-        { class: 'panel-row' },
-        h('span', { class: 'panel-name', text: name, title: name }),
-        input,
-        button({
-          class: 'panel-del',
-          text: '✕',
-          title: '从面板里移除这个字段',
-          onClick: () => removePanelField(convo, name)
-        })
-      )
-    );
+  for (const bucket of buckets) {
+    if (bucket.id) {
+      el.panelFields.appendChild(
+        h('div', { class: 'panel-group-title', text: bucket.id, title: bucket.id })
+      );
+    }
+    for (const { name } of bucket.fields) appendPanelRow(convo, name, panel[name], el.panelFields);
   }
+}
+
+/** 铺一行「字段名 + 值输入框 + 删除」 */
+function appendPanelRow(convo, name, value, container) {
+  const input = h('input', {
+    type: 'text',
+    class: 'panel-value',
+    dataset: { field: name },
+    value: value || '',
+    spellcheck: 'false',
+    'aria-label': name
+  });
+  attachPanelEditor(convo, name, input);
+
+  // 数值字段的值是「60/100」这种，末尾那个 /100 是满值、不是可编辑内容，
+  // 所以拆出来单独显示成一个小标记，让输入框里只剩要改的数字。
+  const def = convoPanelDef(convo, name);
+  const parsed = def && def.type === 'meter' ? parseNumericValue(String(value == null ? '' : value)) : null;
+  const unit = parsed && parsed.total !== null ? `/${trimNumber(parsed.total)}` : '';
+  if (unit) input.value = trimNumber(parsed.n);
+
+  container.appendChild(
+    h(
+      'div',
+      { class: 'panel-row' },
+      h('span', { class: 'panel-name', text: name, title: name }),
+      input,
+      unit ? h('span', { class: 'panel-unit', text: unit }) : null,
+      button({
+        class: 'panel-del',
+        text: '✕',
+        title: '从面板里移除这个字段',
+        onClick: () => removePanelField(convo, name)
+      })
+    )
+  );
 }
 
 function removePanelField(convo, name) {
@@ -6675,6 +6769,16 @@ function renderCharAttrs() {
 
   // 已加的属性。输入框里改值只更新草稿，不重画 —— 一重画光标就跳走了。
   clear(el.c.attrList);
+
+  // 分组建议：这张卡里已经用过的分组名。datalist 只是「可下拉选」，
+  // 不限制你写新名字（想新建一组直接打字）。
+  const groupSuggest = el.c.attrList.parentElement && el.c.attrList.parentElement.querySelector('#attr-group-suggest');
+  if (groupSuggest) {
+    clear(groupSuggest);
+    const names = [...new Set(charAttrs.map((a) => (a.group || '').trim()).filter(Boolean))];
+    for (const g of names) groupSuggest.appendChild(h('option', { value: g }));
+  }
+
   charAttrs.forEach((attr, index) => {
     const valueInput = h('input', {
       type: 'text',
@@ -6709,7 +6813,7 @@ function renderCharAttrs() {
     // 「更多」：默认展开条件是「已经有范围或规则」，但用户手动收起/展开过
     // 就以手动状态为准（_moreOpen 是 true/false/undefined 三态）——
     // 只看 hasMore 的话，一旦设过范围就再也收不起来了。
-    const hasMore = typeof attr.min === 'number' || typeof attr.max === 'number' || !!attr.hint;
+    const hasMore = typeof attr.min === 'number' || typeof attr.max === 'number' || !!attr.hint || !!attr.group;
     const moreOpen = attr._moreOpen === undefined ? hasMore : attr._moreOpen === true;
 
     const moreBtn = button({
@@ -6776,6 +6880,22 @@ function renderCharAttrs() {
         }
       });
 
+      // 分组：填同一个名字的字段在状态面板里归到一组（留空 = 不分组）
+      const groupInput = h('input', {
+        type: 'text',
+        class: 'attr-group',
+        value: attr.group || '',
+        spellcheck: 'false',
+        list: 'attr-group-suggest',
+        placeholder: '分组（可留空，比如「关系」）',
+        'aria-label': `${attr.name} 的分组`,
+        oninput: () => {
+          const text = groupInput.value.trim();
+          if (text) attr.group = text;
+          else delete attr.group;
+        }
+      });
+
       const more = h('div', { class: 'attr-more' });
       if ((attr.type || 'text') === 'meter') {
         more.appendChild(
@@ -6783,6 +6903,7 @@ function renderCharAttrs() {
         );
       }
       more.appendChild(hintInput);
+      more.appendChild(groupInput);
       wrap.appendChild(more);
     }
 
@@ -6946,19 +7067,21 @@ function appendPanelFields(convo, pairs) {
     const def = normalizePanelField({ ...raw, name });
     if (!def) continue;
 
-    // 范围/hint 记到会话上（只有真的有内容才记，免得存一堆空壳）
-    if (def.type !== 'text' || def.hint) {
+    // 范围/hint/分组记到会话上（只有真的有内容才记，免得存一堆空壳）
+    if (def.type !== 'text' || def.hint || def.group) {
       defs[name] = {
         type: def.type,
         ...(typeof def.min === 'number' ? { min: def.min } : {}),
         ...(typeof def.max === 'number' ? { max: def.max } : {}),
-        ...(def.hint ? { hint: def.hint } : {})
+        ...(def.hint ? { hint: def.hint } : {}),
+        ...(def.group ? { group: def.group } : {})
       };
     }
 
-    // 初始值也过一遍范围（卡作者自己写越界了，也一样夹回来）
+    // 初始值也过一遍范围（卡作者自己写越界了，也一样夹回来），
+    // 并统一成「分子/满值」格式（卡里 initial 常是裸数字 20）
     const text = String(def.value == null ? '' : def.value).trim();
-    if (text) panel[name] = clampFieldValue(text, def).value.slice(0, 500);
+    if (text) panel[name] = clampFieldValue(mergeMeterValue(text, '', def), def).value.slice(0, 500);
   }
 
   if (!changed) return false;
