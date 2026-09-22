@@ -25,6 +25,7 @@ import { esc, renderMarkdown } from './ui/markdown.js';
 import { h, button, card, clear, renderListPage } from './ui/build.js';
 
 import { persistConversations } from './data/persist.js';
+import { reissueImportedIds } from './data/library-reissue.js';
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -106,6 +107,9 @@ function characters() {
   return Array.isArray(state.characters) ? state.characters : [];
 }
 
+// 导入时重发 id 用的自增序号：同一毫秒里连导几次也不会撞车
+let importSeq = 0;
+
 /**
  * 角色编辑器当前能看到的角色列表：角色库，或者某本世界书里的角色副本。
  * 编辑器里所有读写都走这两个函数，副本才能被同一套表单编辑。
@@ -185,6 +189,16 @@ function effectiveWorldbookIds(convo) {
   if (character.worldbookEnabled === false) return [];
 
   return Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
+}
+
+/**
+ * 导入进来的东西要重新发一批 id（并改写角色 → 世界书的指向）。
+ * 实现搬到了 data/library-reissue.js —— 那段逻辑以前在两个导入函数里各有一份，
+ * 而且夹在弹窗和落盘之间，测不到；「绑定指到不存在的书」这个 bug 就是这么漏掉的。
+ */
+function reissueImported(books, chars) {
+  importSeq += 1;
+  return reissueImportedIds(books, chars, `${Date.now().toString(36)}-${importSeq}`);
 }
 
 async function matchWorldbookSection(convo) {
@@ -7046,18 +7060,8 @@ async function importCards() {
     return;
   }
 
-  // 重新发一批 id：主进程是同一毫秒里生成的，撞车的概率不能忽略
-  const stamp = Date.now().toString(36);
-  const fresh = added.map((c, i) => ({ ...c, id: `c${stamp}-${i}` }));
-
-  // 世界书要换 id；书里内嵌的角色副本也一起换，免得两次导入撞上同一个 id
-  const freshBooks = addedBooks.map((w, i) => {
-    const book = { ...w, id: `w${stamp}-${i}` };
-    if (Array.isArray(book.characters)) {
-      book.characters = book.characters.map((c, j) => ({ ...c, id: `wc${stamp}-${i}-${j}` }));
-    }
-    return book;
-  });
+  // 重新发一批 id（并把角色→世界书的指向一起改写，见 data/library-reissue.js）
+  const { books: freshBooks, chars: fresh } = reissueImported(addedBooks, added);
 
   state.worldbooks = [...worldbooks(), ...freshBooks];
   state.characters = [...characters(), ...fresh];
@@ -7117,16 +7121,8 @@ async function importWorldbooks() {
     return;
   }
 
-  // 主进程可能同一毫秒里生成多个 id，这里统一重发一批，避免撞车
-  const stamp = Date.now().toString(36);
-  const freshBooks = addedBooks.map((w, i) => {
-    const book = { ...w, id: `w${stamp}-${i}` };
-    if (Array.isArray(book.characters)) {
-      book.characters = book.characters.map((c, j) => ({ ...c, id: `wc${stamp}-${i}-${j}` }));
-    }
-    return book;
-  });
-  const freshChars = added.map((c, i) => ({ ...c, id: `c${stamp}-${i}` }));
+  // 主进程可能同一毫秒里生成多个 id，这里统一重发（含角色→世界书的指向）
+  const { books: freshBooks, chars: freshChars } = reissueImported(addedBooks, added);
 
   state.worldbooks = [...worldbooks(), ...freshBooks];
   if (freshChars.length) state.characters = [...characters(), ...freshChars];

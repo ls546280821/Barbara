@@ -896,6 +896,21 @@ await scenario('导出', async () => {
   await waitFor('切到角色库页面', () => shown('#view-chars'));
   click(buttonByText($$('#char-page-grid .char-card')[0], '编辑'));
   await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+
+  // 先给它绑一本世界书再导出 —— 这样「导出的卡带不带 character_book」
+  // 才验得到（宿主侧的 probeExports 会看导出的卡里有没有这本）。
+  click('#c-wb-add-btn');
+  await waitFor('世界书选择浮层出现', () => !!$('.cwb-picker'));
+  const exportBook = $$('.cwb-picker .cwb-picker-row').find((o) =>
+    String(o.textContent || '').includes('冒烟测试世界')
+  );
+  if (exportBook) {
+    click(exportBook);
+    await waitFor('导出场景：世界书绑上了', () => $$('#c-wb-list .cwb-row').length === 1);
+  } else {
+    check('导出场景：能选到种子世界书', false, JSON.stringify($$('.cwb-picker .cwb-picker-row').map((o) => o.textContent.trim())));
+  }
+
   click('#btn-export-char');
   await sleep(300);
   check('导出角色卡后有提示', $('#toast').textContent.includes('已导出'), $('#toast').textContent);
@@ -1619,6 +1634,102 @@ await scenario('角色自带的世界书：顶部能看出生效', async () => {
         check('并且标明了是「角色自带」', meta.includes('（角色自带）'), meta);
       }
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  场景 20：导入后重发 id 时，角色 → 世界书的绑定必须跟着改写
+//
+//  这一条是**真 bug 的回归测试**：导入时主进程把内嵌世界书自动绑到角色上，
+//  渲染层随后给两边都重发 id —— 只换书的 id 不改写角色里的指向，
+//  绑定就指到一本不存在的书，表现是「书在库里但就是不生效」，全程不报错。
+//
+//  逻辑在 renderer/js/data/library-reissue.js，是个 ES module，
+//  所以这里用动态 import 拿真代码来测（不是照抄一份）。
+// ---------------------------------------------------------------------------
+await scenario('导入：重发 id 时绑定要跟着走', async () => {
+  let mod = null;
+  try {
+    // 按页面 URL 解析相对路径（executeJavaScript 里没有 import.meta）
+    const url = new URL('js/data/library-reissue.js', document.baseURI).href;
+    mod = await import(url);
+  } catch (err) {
+    check('导入重发 id 的模块能加载', false, (err && err.message) || String(err));
+  }
+
+  if (mod && typeof mod.reissueImportedIds === 'function') {
+    check('导入重发 id 的模块能加载', true);
+
+    // 主进程刚给的那批：角色自带世界书，绑的是主进程生成的旧 id
+    const out = mod.reissueImportedIds(
+      [
+        { id: 'w-old-1', name: '卡里自带的世界书', entries: [], characters: [{ id: 'wc-old', name: '副本' }] },
+        { id: 'w-old-2', name: '另一本', entries: [] }
+      ],
+      [
+        { id: 'c-old-1', name: '导入的角色', worldbookIds: ['w-old-1'] },
+        { id: 'c-old-2', name: '没绑书的角色', worldbookIds: [] }
+      ],
+      'stamp1'
+    );
+
+    const book1 = out.books[0];
+    const char1 = out.chars[0];
+
+    check('书拿到了新 id', !!book1 && book1.id === 'wstamp1-0', book1 && book1.id);
+    check('角色拿到了新 id', !!char1 && char1.id === 'cstamp1-0', char1 && char1.id);
+    check(
+      '角色指向的世界书**跟着改写**了（这是那个 bug 的关键）',
+      !!char1 && Array.isArray(char1.worldbookIds) && char1.worldbookIds[0] === book1.id,
+      char1 ? `worldbookIds=${JSON.stringify(char1.worldbookIds)} 书的 id=${book1 && book1.id}` : '没有角色'
+    );
+    check(
+      '改写后的指向在库里真的能对上（不是悬空引用）',
+      !!char1 && out.books.some((b) => b.id === char1.worldbookIds[0]),
+      JSON.stringify(out.books.map((b) => b.id))
+    );
+    check('书里的角色副本也换了 id', !!book1 && book1.characters[0].id === 'wcstamp1-0-0', book1 && book1.characters[0].id);
+    check('没绑书的角色不受影响', !!out.chars[1] && out.chars[1].worldbookIds.length === 0, JSON.stringify(out.chars[1] && out.chars[1].worldbookIds));
+    check('原来的 id 没有被顺手改掉（只读输入）', !!out.books[0] && !!char1, '');
+
+    // 两次导入不能撞 id
+    const again = mod.reissueImportedIds([{ id: 'w-old-1', name: 'x', entries: [] }], [{ id: 'c-old-1', name: 'y', worldbookIds: ['w-old-1'] }], 'stamp2');
+    check('两次导入的 id 不撞车', again.books[0].id !== book1.id && again.chars[0].id !== char1.id, `${again.books[0].id} vs ${book1.id}`);
+    check(
+      '第二次导入的绑定同样跟着改写',
+      again.chars[0].worldbookIds[0] === again.books[0].id,
+      JSON.stringify(again.chars[0].worldbookIds)
+    );
+
+    // 指向一本这次没导入的书时，别把 id 弄丢（宁可留着悬空，也不要静默清掉）
+    const orphan = mod.reissueImportedIds([], [{ id: 'c-old-9', name: 'z', worldbookIds: ['w-not-imported'] }], 'stamp3');
+    check(
+      '指向本次没导入的书时，原样留着不吞掉',
+      orphan.chars[0].worldbookIds[0] === 'w-not-imported',
+      JSON.stringify(orphan.chars[0].worldbookIds)
+    );
+
+    // 没传 worldbookIds / 没传 characters 的脏数据不该崩
+    let dirtyOk = true;
+    let dirtyDetail = '';
+    try {
+      const dirty = mod.reissueImportedIds([null, { id: 'w-old-3', name: 'n' }], [{ id: 'c-old-3', name: 'm' }], 'stamp4');
+      dirtyOk = dirty.books.length === 2 && dirty.chars.length === 1 && !('worldbookIds' in dirty.chars[0]);
+      dirtyDetail = JSON.stringify(dirty);
+    } catch (err) {
+      dirtyOk = false;
+      dirtyDetail = '崩了：' + ((err && err.message) || err);
+    }
+    check('脏数据（缺 id / 缺 worldbookIds）不崩', dirtyOk, dirtyDetail);
+
+    let emptyOk = true;
+    try {
+      const empty = mod.reissueImportedIds(undefined, null, 'stamp5');
+      emptyOk = empty.books.length === 0 && empty.chars.length === 0;
+    } catch (err) {
+      emptyOk = false;
+    }
+    check('空输入返回空结果', emptyOk);
   }
 });
 

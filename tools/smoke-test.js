@@ -29,6 +29,14 @@ const { normalizeCharacter } = require('../main/characters.js');
 const { pngWithTextChunk, parseCharacterCardPng } = require('../main/png.js');
 // 世界书匹配（含递归扫描）也用真实现
 const { matchWorldbookEntries, formatWorldbookSection } = require('../main/worldbook-match.js');
+// 导入链路的编排：读文件 → 解析 → 自动绑定。
+// 以前 characters:import 在冒烟测试里是个 `{canceled:true}` 的桩，
+// 所以「卡里内嵌的世界书被丢掉」「导入后绑定指到不存在的书」这类 bug 测不出来。
+const { importFiles } = require('../main/import-files.js');
+// 导入时的形状识别 / 归一化：和主进程 handler 跑的是同一份
+const { parseImportFile } = require('../main/card-import.js');
+// 世界书落盘归一化：和 main.js 的 worldbooks:save 跑的是同一份
+const { createWorldbookNormalizer } = require('../main/worldbook-store.js');
 // 语义检索的向量工具也用真实现（编解码 / 余弦 / topK 都是它）
 const {
   hashText,
@@ -276,18 +284,41 @@ function registerStubs() {
     }
     if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
   });
+  // 导入按钮本身还是桩：界面点「导入」会弹系统文件框，测试里没法点。
+  // 但导入链路的**真代码**已经被覆盖到了 ——
+  //   · 编排（读文件→解析→自动绑定）：probeImport 用真 PNG 字节喂 main/import-files.js
+  //   · 形状识别 / 归一化：main/card-import.js，同一份
+  //   · 导出→导入的真往返：probeExports 用渲染层交出来的真实 PNG 字节
+  //   · 重发 id 时改写角色→世界书的绑定：smoke-renderer 里动态 import 真模块
+  // 这里返回 canceled，是为了让界面那条路径保持「用户取消」的默认行为。
   ipcMain.handle('characters:import', () => ({ canceled: true }));
 
   // --- 世界书 ---
+  // 过一遍**真正的**落盘归一化 —— 和 main.js 的 worldbooks:save 跑同一份。
+  // 以前这里只是 clone 一下就存，所以「世界书存盘再读回来字段会不会丢」
+  // 在自动化里是空的（recursive / opening / characters 都是白名单字段，
+  // 漏一个就会被静默重置）。
+  const normalizeStoredWorldbook = createWorldbookNormalizer({
+    makeId: (() => {
+      let n = 0;
+      return () => `w-smoke-${(n += 1)}`;
+    })(),
+    normalizeCharacter: (item) => normalizeCharacter(item, 'manual')
+  });
+
   ipcMain.handle('worldbooks:get', () => clone({ worldbooks: store.worldbooks }));
   ipcMain.handle('worldbooks:save', (_event, payload) => {
     remember('worldbooks:save', payload);
-    if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
+    if (payload && Array.isArray(payload.worldbooks)) {
+      store.worldbooks = clone(payload.worldbooks.map((w) => normalizeStoredWorldbook(w)));
+    }
     return { ok: true };
   });
   ipcMain.on('worldbooks:save-sync', (_event, payload) => {
     remember('worldbooks:save-sync', payload);
-    if (payload && Array.isArray(payload.worldbooks)) store.worldbooks = clone(payload.worldbooks);
+    if (payload && Array.isArray(payload.worldbooks)) {
+      store.worldbooks = clone(payload.worldbooks.map((w) => normalizeStoredWorldbook(w)));
+    }
   });
   // 世界书匹配用**真实现**（main/worldbook-match.js），这样递归扫描、
   // 副关键词、概率这些逻辑测的是真代码。这里只补主进程 handler 里那段
@@ -599,9 +630,21 @@ function probeInjection(result) {
  * 这两步都是真代码（main/png.js），所以「导出的卡能不能被导入」是真验过的。
  */
 function probeExports(result) {
-  // 按内容找，不按下标 —— 以后调整场景顺序时不会连带把断言搞错
+  // 按内容找，不按下标 —— 以后调整场景顺序时不会连带把断言搞错。
+  // ⚠️ 世界书那条要认准「独立导出的 lorebook」：角色卡里也有 entries，
+  // 而且导出的卡也可能内嵌 character_book，光看 `"entries"` 会误配到角色卡上。
+  // 独立导出的书顶层是 name + entries 对象，且没有 chara_card_v2 那套字段。
   const charExport = exportedPayloads.find((p) => p.text && p.text.includes('chara_card_v2'));
-  const wbExport = exportedPayloads.find((p) => p.text && p.text.includes('"entries"'));
+  const wbExport = exportedPayloads.find((p) => {
+    if (!p.text || String(p.fileName || '').indexOf('.json') < 0) return false;
+    try {
+      const parsed = JSON.parse(p.text);
+      return !!parsed && typeof parsed.name === 'string' && !!parsed.entries &&
+        !Array.isArray(parsed.entries) && !parsed.data && !parsed.spec;
+    } catch (err) {
+      return false;
+    }
+  });
   const convoExport = exportedPayloads.find((p) => String(p.fileName || '').endsWith('.md'));
 
   // --- 角色卡 ---
@@ -675,6 +718,314 @@ function probeExports(result) {
     pass: convoOk,
     detail: convoOk ? '' : md.slice(0, 80)
   });
+
+  // --- 导出的角色卡里得带上「这张卡绑定的世界书」 ---
+  // 这条以前写死 null，表现是「导出再导入，背景设定全丢」。
+  // 注意：卡里带的是 character_book（v2 规范字段），不是应用内的 worldbookIds ——
+  // 后者是我们的内部记录，本来就不该写进卡里。
+  let boundOk = false;
+  let boundDetail = '没有角色卡导出记录';
+  if (charExport) {
+    try {
+      const card = JSON.parse(String(charExport.text || '{}'));
+      const book = card.data && card.data.character_book;
+      const barbara = (card.data && card.data.extensions && card.data.extensions.barbara) || {};
+      boundOk = !!book && !!book.name && barbara.worldbookEnabled === true;
+      boundDetail = `character_book=${book ? `「${book.name}」` : 'null'} worldbookEnabled=${barbara.worldbookEnabled}`;
+    } catch (err) {
+      boundDetail = '角色卡 JSON 解析失败：' + ((err && err.message) || err);
+    }
+  }
+  result.results.push({
+    name: '导出：角色卡带上了它绑定的世界书',
+    pass: boundOk,
+    detail: boundOk ? '' : boundDetail
+  });
+
+  // --- 导出 → **真导入**：卡里那本书过一遍真实导入链路还能回来 ---
+  // 上面那条只证明「导出的 JSON 里有这个字段」，这条证明「这字段真能被读回来」。
+  // 中间隔着 PNG 编码、base64、形状识别、归一化、自动绑定 —— 全是真代码。
+  let roundOk = false;
+  let roundDetail = '没有角色卡导出记录';
+  if (charExport) {
+    try {
+      const png = Buffer.from(String(charExport.base64 || ''), 'base64');
+      const cardPng = pngWithTextChunk(png, charExport.pngText.keyword, charExport.pngText.text);
+      const back = importFiles({
+        paths: ['D:\\roundtrip\\card.png'],
+        readFile: () => cardPng,
+        parseImportFile,
+        makeWorldbookId: () => 'w-roundtrip'
+      });
+      const c = (back.characters || [])[0];
+      const b = (back.worldbooks || [])[0];
+      roundOk =
+        !!c &&
+        !!b &&
+        Array.isArray(c.worldbookIds) &&
+        c.worldbookIds[0] === b.id &&
+        (b.entries || []).length > 0;
+      roundDetail = `角色=${c && c.name} 书=${b && b.name} 条目=${b ? (b.entries || []).length : 0} 绑定=${JSON.stringify(
+        c && c.worldbookIds
+      )} errors=${JSON.stringify(back.errors)}`;
+    } catch (err) {
+      roundDetail = '往返崩了：' + ((err && err.message) || err);
+    }
+  }
+  result.results.push({
+    name: '导出 → 导入：卡里自带的世界书真的能读回来（真往返）',
+    pass: roundOk,
+    detail: roundOk ? '' : roundDetail
+  });
+}
+
+/**
+ * 导入链路的端到端验证 —— 用真 PNG 字节喂**真实的** importFiles。
+ *
+ * 要跑通的是整条链：文件字节 → 形状识别 → 归一化 → 落库 → **自动绑到角色上**。
+ * 最后那步最关键也最隐蔽：绑定断了不会有任何报错，表现只是「书在库里，
+ * 但聊起来就是不生效」。以前 characters:import 在测试里是个桩，
+ * 这条链路在自动化里完全是空的。
+ */
+function probeImport(result) {
+  const push = (name, pass, detail) => result.results.push({ name, pass: !!pass, detail: detail || '' });
+
+  // 一张 1x1 的真 PNG，拿来当角色卡的底图
+  const basePng = (() => {
+    try {
+      const exported = exportedPayloads.find((p) => String(p.fileName || '').endsWith('.png') && p.base64);
+      if (exported) return Buffer.from(String(exported.base64), 'base64');
+    } catch (err) {
+      /* 落到下面的手工 PNG */
+    }
+    return Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64'
+    );
+  })();
+
+  const entries = {
+    0: {
+      uid: 0,
+      comment: '导入测试条目',
+      key: ['导入关键词'],
+      keysecondary: [],
+      content: '这条设定是从角色卡里带出来的。',
+      constant: false,
+      selective: false,
+      selectiveLogic: 'AND_ANY',
+      order: 100,
+      probability: 100,
+      disable: false,
+      excludeRecursion: true,
+      matchWholeWords: false,
+      caseSensitive: false
+    }
+  };
+
+  const cardJson = JSON.stringify({
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: '导入测试角色',
+      description: '一个用来验导入链路的角色',
+      personality: '安静',
+      scenario: '测试场景',
+      first_mes: '你好。',
+      mes_example: '',
+      creator_notes: '',
+      system_prompt: '',
+      post_history_instructions: '',
+      tags: [],
+      character_book: { name: '卡里自带的世界书', entries },
+      extensions: { barbara: { age: '18', gender: '女', race: '精灵', attributes: [] } }
+    }
+  });
+
+  const pngCard = pngWithTextChunk(basePng, 'chara', Buffer.from(cardJson, 'utf8').toString('base64'));
+  const lorebookJson = JSON.stringify({ name: '独立世界书', entries });
+
+  const fakeFs = (files) => ({
+    readFile: (p) => {
+      if (p in files) return files[p];
+      throw new Error('ENOENT');
+    },
+    basename: (p) => String(p).split(/[\\/]/).pop(),
+    extname: (p) => {
+      const base = String(p).split(/[\\/]/).pop();
+      const i = base.lastIndexOf('.');
+      return i > 0 ? base.slice(i) : '';
+    }
+  });
+
+  const idGen = (() => {
+    let n = 0;
+    return () => `w-import-${(n += 1)}`;
+  })();
+
+  const run = (files, paths) =>
+    importFiles({
+      paths,
+      parseImportFile,
+      makeWorldbookId: idGen,
+      ...fakeFs(files)
+    });
+
+  let out = null;
+  try {
+    out = run(
+      {
+        'D:\\tmp\\导入测试角色.png': pngCard,
+        'D:\\tmp\\独立世界书.json': Buffer.from(lorebookJson, 'utf8'),
+        'D:\\tmp\\随便一个文件.txt': Buffer.from('这不是卡也不是书', 'utf8')
+      },
+      ['D:\\tmp\\导入测试角色.png', 'D:\\tmp\\独立世界书.json', 'D:\\tmp\\随便一个文件.txt']
+    );
+  } catch (err) {
+    push('导入：链路不崩', false, (err && err.stack) || String(err));
+  }
+
+  if (out) {
+    const char = (out.characters || [])[0];
+    const book = (out.worldbooks || []).find((b) => b.name === '卡里自带的世界书');
+    const standalone = (out.worldbooks || []).find((b) => b.name === '独立世界书');
+
+    push('导入：PNG 卡读出来了', (out.characters || []).length === 1 && !!char && char.name === '导入测试角色',
+      char ? `roles=${out.characters.length} name=${char.name}` : JSON.stringify(out.errors));
+    push('导入：v2 的 extensions.barbara 也读回来了',
+      !!char && char.age === '18' && char.gender === '女' && char.race === '精灵',
+      char ? `age=${char.age} gender=${char.gender} race=${char.race}` : '没有角色');
+    push('导入：卡里内嵌的世界书被存下来了（以前整本丢掉）', !!book,
+      book ? `「${book.name}」${(book.entries || []).length} 条` : JSON.stringify((out.worldbooks || []).map((b) => b.name)));
+    push('导入：内嵌世界书的条目内容对得上',
+      !!book && (book.entries || []).length === 1 && book.entries[0].content === '这条设定是从角色卡里带出来的。' &&
+        book.entries[0].keys[0] === '导入关键词',
+      book ? JSON.stringify(book.entries && book.entries[0]) : '没有这本书');
+    push('导入：内嵌世界书自动绑到了这张卡上',
+      !!char && !!book && Array.isArray(char.worldbookIds) && char.worldbookIds.length === 1 &&
+        char.worldbookIds[0] === book.id,
+      char ? `worldbookIds=${JSON.stringify(char.worldbookIds)} bookId=${book && book.id}` : '没有角色');
+    push('导入：自带世界书的开关默认是开的', !!char && char.worldbookEnabled === true,
+      char ? `worldbookEnabled=${char.worldbookEnabled}` : '没有角色');
+    push('导入：temp 字段 worldbook 没有留在角色上', !!char && !('worldbook' in char),
+      char ? Object.keys(char).join(',') : '没有角色');
+
+    push('导入：单独的 lorebook JSON 进的是世界书库、不是角色库',
+      !!standalone && (out.characters || []).length === 1,
+      `worldbooks=${(out.worldbooks || []).map((b) => b.name).join(',')} roles=${(out.characters || []).length}`);
+    push('导入：World Info 的字段映射没丢（key → keys）',
+      !!standalone && (standalone.entries || []).length === 1 && standalone.entries[0].keys[0] === '导入关键词',
+      standalone ? JSON.stringify(standalone.entries && standalone.entries[0]) : '没有这本书');
+
+    push('导入：认不出来的文件只记一条错误、不影响别的文件',
+      (out.errors || []).length === 1 && String(out.errors[0]).includes('随便一个文件.txt'),
+      JSON.stringify(out.errors));
+    push('导入：整批结果里角色只多了一个', (out.characters || []).length === 1,
+      `roles=${(out.characters || []).length}`);
+  }
+
+  // 取消 / 一个文件都没有时，不能凭空造出东西来
+  let emptyOk = false;
+  let emptyDetail = '';
+  try {
+    const none = run({}, []);
+    emptyOk = (none.characters || []).length === 0 && (none.worldbooks || []).length === 0;
+    emptyDetail = JSON.stringify(none);
+  } catch (err) {
+    emptyDetail = '崩了：' + ((err && err.message) || err);
+  }
+  push('导入：没选文件时什么都不发生', emptyOk, emptyDetail);
+
+  // 读文件失败得是「一条错误」，而不是整批炸掉
+  let failOk = false;
+  let failDetail = '';
+  try {
+    const bad = run({ 'D:\\tmp\\好的.json': Buffer.from(lorebookJson, 'utf8') }, [
+      'D:\\tmp\\不存在的.png',
+      'D:\\tmp\\好的.json'
+    ]);
+    failOk = (bad.errors || []).length === 1 && (bad.worldbooks || []).length === 1;
+    failDetail = JSON.stringify(bad.errors);
+  } catch (err) {
+    failDetail = '崩了：' + ((err && err.message) || err);
+  }
+  push('导入：某个文件读不到时，其余文件照样导入', failOk, failDetail);
+}
+
+/**
+ * 世界书存盘归一化的白名单验证。
+ *
+ * normalizeWorldbook 是**白名单式**的：没列进返回对象的字段直接消失。
+ * recursive / opening / characters 都踩过这个坑 ——
+ * 表现是「存一次盘，递归开关全变回关」，不报错、不提示。
+ * 这里用真的落盘归一化跑一遍往返。
+ */
+function probeWorldbookStore(result) {
+  const push = (name, pass, detail) => result.results.push({ name, pass: !!pass, detail: detail || '' });
+
+  const normalize = createWorldbookNormalizer({
+    makeId: () => 'w-fixed',
+    normalizeCharacter: (item) => normalizeCharacter(item, 'manual')
+  });
+
+  const original = {
+    id: 'w-keep',
+    name: '字段保全测试书',
+    opening: '进来就会看到的第一句话',
+    entries: [
+      {
+        id: 'e-keep',
+        title: '会递归的条目',
+        keys: ['关键词'],
+        content: '正文',
+        recursive: true,
+        constant: false,
+        enabled: true,
+        matchWholeWords: false,
+        caseSensitive: false,
+        priority: 100
+      },
+      {
+        id: 'e-off',
+        title: '被停用的条目',
+        keys: ['停用'],
+        content: '不该生效',
+        recursive: false,
+        // 老写法 disable:true = 停用
+        disable: true
+      }
+    ],
+    characters: [{ id: 'wc-1', name: '书里的角色副本', description: '副本设定', attributes: [{ name: '体力', value: '10' }] }]
+  };
+
+  let back = null;
+  try {
+    back = normalize(original);
+  } catch (err) {
+    push('世界书落盘：归一化不崩', false, (err && err.stack) || String(err));
+    return;
+  }
+
+  const e0 = (back.entries || [])[0] || {};
+  const e1 = (back.entries || [])[1] || {};
+
+  push('世界书落盘：书本身的 id / name 保留', back.id === 'w-keep' && back.name === '字段保全测试书',
+    `id=${back.id} name=${back.name}`);
+  push('世界书落盘：opening 没被丢掉（白名单漏过）', back.opening === '进来就会看到的第一句话', JSON.stringify(back.opening));
+  push('世界书落盘：条目数对', (back.entries || []).length === 2, `entries=${(back.entries || []).length}`);
+  push('世界书落盘：recursive 没被重置成 false（白名单漏过）', e0.recursive === true, `recursive=${e0.recursive}`);
+  push('世界书落盘：disable:true 读成 enabled:false', e1.enabled === false, `enabled=${e1.enabled}`);
+  push('世界书落盘：书里的角色副本没被丢掉', (back.characters || []).length === 1 && back.characters[0].name === '书里的角色副本',
+    JSON.stringify((back.characters || []).map((c) => c.name)));
+  push('世界书落盘：副本的 attributes 也回来了',
+    !!back.characters[0] && Array.isArray(back.characters[0].attributes) && back.characters[0].attributes.length === 1,
+    JSON.stringify(back.characters[0] && back.characters[0].attributes));
+
+  // 子进程真的读回来过（渲染层存过盘）
+  const loaded = store.worldbooks.find((w) => w.id === 'w-test');
+  push('世界书落盘：内存里那本种子的 recursive 还在（真存过盘）',
+    !!loaded && (loaded.entries || []).some((e) => e.recursive === true),
+    loaded ? `recursive=${JSON.stringify((loaded.entries || []).map((e) => e.recursive))}` : '内存里找不到种子书');
 }
 
 /**
@@ -1036,6 +1387,8 @@ app.whenReady().then(async () => {
     try {
       probeInjection(result);
       probeExports(result);
+      probeImport(result);
+      probeWorldbookStore(result);
       probeRecursion(result);
       probeImageMessage(result);
       probeImageGen(result);

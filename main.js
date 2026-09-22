@@ -598,7 +598,7 @@ function saveCharacters(payload, options) {
   // 导入角色卡时可能顺带解析出内嵌世界书，跟角色同一次写入落盘
   const hasWorldbooks = payload && Array.isArray(payload.worldbooks);
   const books = hasWorldbooks
-    ? { worldbooks: payload.worldbooks.slice(-MAX_WORLDBOOKS).map((w) => normalizeWorldbook(w)) }
+    ? { worldbooks: payload.worldbooks.slice(-MAX_WORLDBOOKS).map((w) => normalizeStoredWorldbook(w)) }
     : null;
 
   if (opts.immediate) {
@@ -616,76 +616,6 @@ function saveCharacters(payload, options) {
  * 实现搬到了 main/png.js（读和写在一起，测试能做「导出 → 导入」的往返）。
  */
 
-/**
- * 把角色卡里的头像字段转成可用的 dataURL。
- * 可能是完整的 dataURL、裸 base64，也可能是表示「没有头像」的字符串 'none'。
- */
-function cardAvatarToDataUrl(value) {
-  if (typeof value !== 'string' || !value) return '';
-  if (value.startsWith('data:image/')) return value;
-  // 'none' 是酒馆表示无头像的写法；太短的也不可能是图片
-  if (value === 'none' || value.length < 64) return '';
-  return `data:image/png;base64,${value}`;
-}
-
-/**
- * 把角色卡（v1 扁平 / v2、v3 包一层 data）转成内部格式。
- * 文件名在没写角色名时当兜底。
- * 另外把卡里内嵌的世界书（character_book）一并解析出来 ——
- * 以前它是被整个丢掉的，导致「导入后角色失忆」。
- */
-function characterFromCard(card, avatar, source, fallbackName) {
-  if (!card || typeof card !== 'object') return null;
-
-  // v2 / v3 把真正的数据放在 data 里；v1 是直接铺在顶层
-  const d = card.data && typeof card.data === 'object' ? card.data : card;
-
-  // 一个角色卡至少得有点东西。随便选一个普通 JSON 文件时，
-  // 这里会返回 null，界面就能报「解析失败」而不是收下一个空白角色。
-  const recognizable = d.name || d.char_name || d.description || d.first_mes || d.personality;
-  if (!recognizable) return null;
-
-  // 自己导出的卡会把年龄/性别/种族/属性放在 extensions.barbara
-  const ext =
-    d.extensions && typeof d.extensions === 'object' && d.extensions.barbara && typeof d.extensions.barbara === 'object'
-      ? d.extensions.barbara
-      : {};
-
-  const character = normalizeCharacter(
-    {
-      name: d.name || d.char_name || fallbackName,
-      avatar,
-      // 老版本 TavernAI 用的是 char_* / world_scenario 这一套字段名，一并兼容
-      description: d.description || d.char_persona,
-      personality: d.personality,
-      scenario: d.scenario || d.world_scenario,
-      firstMes: d.first_mes || d.first_message || d.greeting || d.char_greeting,
-      mesExample: d.mes_example || d.example_dialogue || d.char_example_dialogue,
-      systemPrompt: d.system_prompt,
-      postHistoryInstructions: d.post_history_instructions,
-      creatorNotes: d.creator_notes || d.creatorcomment,
-      tags: d.tags,
-      // 自己导出去的卡会把年龄/性别/种族/属性放在 extensions.barbara，
-      // 这里读回来，导出再导入才是一个闭环（别的软件按规范会原样忽略这段）
-      age: ext.age,
-      gender: ext.gender,
-      race: ext.race,
-      attributes: ext.attributes,
-      // 自带世界书的开关也跟着一起回来。缺省 true，所以没这个字段的卡不受影响。
-      worldbookEnabled: typeof ext.worldbookEnabled === 'boolean' ? ext.worldbookEnabled : true
-    },
-    source
-  );
-
-  // v2 卡把世界书放在 data.character_book；也有工具放在顶层
-  character.worldbook = worldbookFromCharacterBook(
-    d.character_book || card.character_book,
-    character.name
-  );
-
-  return character;
-}
-
 // ---------------------------------------------------------------------------
 //  世界书 / World Info（Lorebook）
 //  酒馆的「动态词典」：条目带关键词，只有关键词出现在近期对话里才注入提示词。
@@ -696,17 +626,10 @@ function characterFromCard(card, avatar, source, fallbackName) {
 //  每本书还能装若干「角色副本」，这些副本与角色库里的角色互相独立、互不影响。
 // ---------------------------------------------------------------------------
 
-// 单个世界书的条目数上限。酒馆那边不限制，但这里的匹配是每轮同步跑的，
-// 上万条会让每句话都卡一下，所以给一个足够宽松、但不会拖慢聊天的上限。
-const MAX_WORLDBOOK_ENTRIES = 5000;
 // 世界书数量上限。和会话一样给个上限，免得角色卡反复导入把文件撑到几十 MB。
 const MAX_WORLDBOOKS = 200;
 // 每本世界书里能装多少个角色副本。副本自带头像（base64），所以不能不限量。
 const MAX_WORLDBOOK_CHARACTERS = 50;
-// 一条注入内容的最大长度，防止畸形文件把整个上下文撑爆
-const MAX_WORLDBOOK_CONTENT = 20000;
-// 每条目的关键词数量上限
-const MAX_WORLDBOOK_KEYS = 200;
 // 世界书开场白的上限
 const MAX_WORLDBOOK_OPENING = 4000;
 
@@ -718,135 +641,47 @@ function newWorldbookId() {
   return `w${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
 }
 
-/** 把一条 entry 的不同写法（ST 的 key/keys、constant、order…）统一成内部格式 */
-function normalizeWorldbookEntry(raw) {
-  const r = raw && typeof raw === 'object' ? raw : {};
-  const str = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
-  const bool = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+// --- 匹配引擎 -------------------------------------------------------------
+// 关键词命中判定、递归扫描这些纯逻辑都在 main/worldbook-match.js 里。
+// 搬出去是为了让 tools/smoke-test.js 能 require 同一份代码来测 ——
+// 否则测的是测试里另写的一套，真逻辑坏了也发现不了。
 
-  // ST 内部是 key + keysecondary；导出到 character_book 时叫 keys / secondary_keys
-  const pickKeys = (a, b) => {
-    const value = Array.isArray(a) ? a : Array.isArray(b) ? b : typeof a === 'string' ? [a] : [];
-    return value
-      .filter((k) => typeof k === 'string' && k.trim())
-      .map((k) => k.trim().slice(0, 200))
-      .slice(0, MAX_WORLDBOOK_KEYS);
-  };
+const { entryMatches, matchWorldbookEntries, formatWorldbookSection } = require('./main/worldbook-match.js');
+const { normalizeWorldbook } = require('./main/worldbook-parse.js');
+const { createWorldbookNormalizer } = require('./main/worldbook-store.js');
+const { parseImportFile } = require('./main/card-import.js');
+const { importFiles } = require('./main/import-files.js');
 
-  const keys = pickKeys(r.keys, r.key);
-  const secondaryKeys = pickKeys(r.secondary_keys, r.keysecondary);
-  const content = str(r.content, MAX_WORLDBOOK_CONTENT);
-  // 内容为空、又没有任何关键词的条目没有任何作用，直接丢掉
-  if (!content.trim() && !keys.length) return null;
-
-  const logic = String(r.selectiveLogic || r.selective_logic || '').toUpperCase();
-  const selectiveLogic = ['AND_ANY', 'AND_ALL', 'NOT_ANY', 'NOT_ALL'].includes(logic) ? logic : 'AND_ANY';
-
-  let probability = Number(r.probability);
-  if (!isFinite(probability)) probability = 100;
-  probability = Math.max(0, Math.min(100, probability));
-
-  let order = Number(r.order);
-  if (!isFinite(order)) order = 100;
-
-  // 酒馆新版本用 enabled，老版本/部分导出工具用 disable（true = 停用）。
-  // 两个都认，否则导入老世界书时停用的条目会全部复活。
-  const enabled =
-    typeof r.enabled === 'boolean' ? r.enabled : r.disable === true ? false : true;
-
-  return {
-    id: typeof r.id === 'string' && r.id ? r.id : `e${Math.random().toString(36).slice(2, 10)}`,
-    // comment 是酒馆里的条目备注；没有就退回首关键词，方便在界面里认出来
-    title: str(r.title || r.comment, 200).trim() || keys[0] || '未命名条目',
-    keys,
-    secondaryKeys,
-    selectiveLogic,
-    content,
-    order,
-    // 蓝圈：无条件注入，不需要关键词
-    constant: r.constant === true || r.strategy === 'constant',
-    // 递归：这条命中后，它的正文也参与下一轮扫描，能再带出别的条目。
-    // 默认关 —— 递归会明显增加 token，得一条条显式打开。
-    recursive: r.recursive === true,
-    // 酒馆默认开启「全词匹配」，但官方文档明确说这对中日文有害（不用空格分词），
-    // 所以这里默认关闭，只有显式打开才启用。
-    matchWholeWords: bool(r.matchWholeWords ?? r.match_whole_words, false),
-    caseSensitive: bool(r.caseSensitive ?? r.case_sensitive, false),
-    probability,
-    enabled
-  };
-}
-
-// ---------------------------------------------------------------------------
-//  导出：写文件
-//  角色卡要能导出成「酒馆 PNG 卡」—— 卡数据 base64 后塞进 PNG 的 tEXt 块。
-//  读和写都在 main/png.js 里（独立成模块，测试能 require 同一份代码做往返）。
-// ---------------------------------------------------------------------------
-
+// --- 导出：写文件 -----------------------------------------------------------
+// 角色卡要能导出成「酒馆 PNG 卡」—— 卡数据 base64 后塞进 PNG 的 tEXt 块。
+// 读和写都在 main/png.js 里（独立成模块，测试能 require 同一份代码做往返）。
 const { pngWithTextChunk, parseCharacterCardPng } = require('./main/png.js');
+// 记忆检索的向量与排序，纯函数，同样为了可测而独立成模块。
 const { hashText, encodeVector, decodeVector, rankBySimilarity, collectCandidates } = require('./main/vectors.js');
 
-/** 世界书的条目列表：可能是数组，也可能是酒馆导出时那种以索引为键的对象 */
-function worldbookEntryList(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (!raw || typeof raw !== 'object') return [];
-
-  const values = Object.values(raw);
-  // 对象形式：{ "0": {...}, "1": {...} }。
-  // 只认「所有值都是对象」的情况，免得把单个 entry 误当成一本书。
-  if (values.length && values.every((v) => v && typeof v === 'object' && !Array.isArray(v))) {
-    return values;
-  }
-  return [];
-}
-
-/** 把世界书（数组或带 entries 的对象）整理成内部格式 */
-function normalizeWorldbook(raw, fallbackName) {
-  const r = raw && typeof raw === 'object' ? raw : {};
-  const rawEntries = Array.isArray(raw) ? raw : worldbookEntryList(r.entries);
-  const name =
-    String(r.name || r.title || (typeof fallbackName === 'string' ? fallbackName : '') || '').trim() || '未命名世界书';
-
-  const entries = [];
-  for (const item of rawEntries) {
-    const entry = normalizeWorldbookEntry(item);
-    if (entry) entries.push(entry);
-    if (entries.length >= MAX_WORLDBOOK_ENTRIES) break;
-  }
-
-  // 书里的角色是「独立副本」：从角色库加进来时复制一份，之后两边各改各的，
-  // 单独跟角色库里的那个角色聊天不会影响这里。
-  const rawChars = Array.isArray(r.characters) ? r.characters : [];
-  const characters = [];
-  for (const item of rawChars) {
-    characters.push(normalizeCharacter(item, 'manual'));
-    if (characters.length >= MAX_WORLDBOOK_CHARACTERS) break;
-  }
-
-  return {
-    id: typeof r.id === 'string' && r.id ? r.id : newWorldbookId(),
-    name: name.slice(0, 120),
-    // 进这个世界时自动作为第一条消息；留空则由界面那边让模型现生成一段开局
-    opening: typeof r.opening === 'string' ? r.opening.slice(0, MAX_WORLDBOOK_OPENING) : '',
-    entries,
-    characters,
-    createdAt: Number(r.createdAt) || Date.now(),
-    updatedAt: Number(r.updatedAt) || Date.now()
-  };
-}
+/**
+ * 落盘时走一遍归一化。
+ * 归一化本身在 main/worldbook-parse.js（导入链路 require 的是同一份），
+ * 这里只把主进程特有的两样东西注进去：id 生成规则、角色副本的归一化器。
+ * 具体实现在 main/worldbook-store.js —— 冒烟测试的假后端 require 的是同一份。
+ */
+const normalizeStoredWorldbook = createWorldbookNormalizer({
+  makeId: newWorldbookId,
+  normalizeCharacter: (item) => normalizeCharacter(item, 'manual')
+});
 
 function loadWorldbooks() {
   const data = loadJsonWithFallback(worldbooksFile());
   if (!data || !Array.isArray(data.worldbooks)) return { worldbooks: [] };
   // 保留最近的若干本，防止无限增长
   const list = data.worldbooks.slice(-MAX_WORLDBOOKS);
-  return { worldbooks: list.map((w) => normalizeWorldbook(w)) };
+  return { worldbooks: list.map((w) => normalizeStoredWorldbook(w)) };
 }
 
 function saveWorldbooks(payload, options) {
   const opts = options || {};
   const list = payload && Array.isArray(payload.worldbooks) ? payload.worldbooks : [];
-  const data = { worldbooks: list.slice(-MAX_WORLDBOOKS).map((w) => normalizeWorldbook(w)) };
+  const data = { worldbooks: list.slice(-MAX_WORLDBOOKS).map((w) => normalizeStoredWorldbook(w)) };
 
   if (opts.immediate) {
     writeJsonNow(worldbooksFile(), data);
@@ -855,48 +690,6 @@ function saveWorldbooks(payload, options) {
   }
   return data;
 }
-
-/**
- * 角色卡里内嵌的世界书。
- * ST 导出角色卡时会把「角色绑定的世界书」一起塞进 character_book，
- * 以前这里会被整个丢掉，现在转换成一个独立世界书，并返回给调用方去落盘 + 绑定。
- */
-function worldbookFromCharacterBook(raw, characterName) {
-  if (!raw || typeof raw !== 'object') return null;
-  const book = normalizeWorldbook(raw, `${characterName || '角色'}的世界书`);
-  // 一个条目都没有就没必要存一份空世界书
-  if (!book.entries.length) return null;
-  return book;
-}
-
-/** 把单独的 lorebook 文件（`{entries:[...]}` 或裸数组）转成世界书 */
-function worldbookFromLorebook(raw, fallbackName) {
-  if (!raw || typeof raw !== 'object') return null;
-  const book = normalizeWorldbook(raw, fallbackName);
-  if (!book.entries.length) return null;
-  return book;
-}
-
-/**
- * 这个 JSON 看起来是「独立的世界书文件」，而不是角色卡吗？
- *
- * 必须单独判断：酒馆导出的世界书同样带 name / description，
- * 而 characterFromCard 只要看到 name 或 description 就认定是角色卡 ——
- * 结果整本书被导入成一个空角色，几十条条目被静默丢掉。
- * 顶层有 entries、又没有角色卡专属字段的，按世界书处理。
- */
-function looksLikeLorebook(card) {
-  if (!card || typeof card !== 'object' || Array.isArray(card)) return false;
-  if (!card.entries) return false;
-  return !card.first_mes && !card.char_name && !card.personality && !card.mes_example;
-}
-
-// --- 匹配引擎 -------------------------------------------------------------
-// 关键词命中判定、递归扫描这些纯逻辑都在 main/worldbook-match.js 里。
-// 搬出去是为了让 tools/smoke-test.js 能 require 同一份代码来测 ——
-// 否则测的是测试里另写的一套，真逻辑坏了也发现不了。
-
-const { entryMatches, matchWorldbookEntries, formatWorldbookSection } = require('./main/worldbook-match.js');
 
 /** 一组世界书 id 对应的全部条目（去重，同一个 id 只取一次） */
 function worldbookEntriesByIds(ids) {
@@ -1623,8 +1416,10 @@ function registerIpc() {
   /**
    * 导入角色卡 / 世界书：弹出文件选择框，把选中的 PNG / JSON 解析出来返回。
    * 这里只解析不落盘 —— 由界面决定要不要收下，用户取消时什么都不会变。
-   * 角色卡里内嵌的世界书（character_book）会一起解析出来，存进世界书库；
-   * 但它不会自动跟角色绑定 —— 角色是独立个体，要不要放进那本书由用户决定。
+   *
+   * 「一个文件是什么」的判断和归一化都在 main/card-import.js 里，
+   * 抽出去是为了能单独测（这段以前夹在闭包和文件对话框之间，测不到，
+   * 导致「卡里内嵌的世界书被丢掉」长期没被发现）。
    */
   ipcMain.handle('characters:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -1642,84 +1437,16 @@ function registerIpc() {
       return { canceled: true, characters: [], worldbooks: [], errors: [] };
     }
 
-    const characters = [];
-    const worldbooks = [];
-    const errors = [];
+    const imported = importFiles({
+      paths: result.filePaths,
+      readFile: (file) => fs.readFileSync(file),
+      parseImportFile,
+      makeWorldbookId: newWorldbookId,
+      // 和主进程别处保持一致：单文件 12MB
+      maxBytes: MAX_IMPORT_BYTES
+    });
 
-    for (const file of result.filePaths) {
-      const base = path.basename(file);
-      try {
-        const buffer = fs.readFileSync(file);
-        if (buffer.length > MAX_IMPORT_BYTES) {
-          errors.push(
-            `${base}：文件太大（${(buffer.length / 1048576).toFixed(1)}MB，上限 ${MAX_IMPORT_BYTES / 1048576}MB）`
-          );
-          continue;
-        }
-
-        const ext = path.extname(file).toLowerCase();
-        const fallbackName = path.basename(file, path.extname(file));
-        let card = null;
-        let avatar = '';
-
-        if (ext === '.png') {
-          card = parseCharacterCardPng(buffer);
-          if (card) avatar = `data:image/png;base64,${buffer.toString('base64')}`;
-        } else {
-          card = JSON.parse(buffer.toString('utf8'));
-        }
-
-        if (!card) {
-          errors.push(`${base}：没找到角色卡数据（这张 PNG 里没有 chara 信息？）`);
-          continue;
-        }
-
-        // 有些 JSON 卡自带头像：可能在顶层，也可能在 data 里，
-        // 可能是完整 dataURL，也可能是裸 base64（没有头像时是字符串 'none'）
-        if (!avatar) {
-          avatar = cardAvatarToDataUrl((card.data && card.data.avatar) || card.avatar);
-        }
-
-        // 独立的世界书先判：它同样带 name/description，先走角色卡那条路
-        // 会被当成一个空角色收下，整本书的条目全丢。
-        if (looksLikeLorebook(card)) {
-          const book = worldbookFromLorebook(card, fallbackName);
-          if (book) {
-            worldbooks.push(book);
-            continue;
-          }
-        }
-
-        const character = characterFromCard(card, avatar, ext === '.png' ? 'png' : 'json', fallbackName);
-
-        if (!character) {
-          // 不是角色卡，那就试试当成独立的世界书文件（酒馆的 lorebook JSON）
-          const book = worldbookFromLorebook(card, fallbackName);
-          if (book) {
-            worldbooks.push(book);
-            continue;
-          }
-          errors.push(`${base}：解析失败，既不是角色卡也不是世界书`);
-          continue;
-        }
-
-        // 内嵌世界书：给它一个正式 id 存进世界书库，并**自动绑到这个角色**上。
-        // 一张卡自带的书就是给这张卡用的，导入即可用；
-        // 不想要的话，在角色编辑器里关掉开关或者解绑就行。
-        if (character.worldbook) {
-          const book = { ...character.worldbook, id: newWorldbookId() };
-          worldbooks.push(book);
-          character.worldbookIds = [book.id];
-          character.worldbookEnabled = true;
-        }
-        delete character.worldbook;
-        characters.push(character);
-      } catch (err) {
-        errors.push(`${base}：${(err && err.message) || '读取失败'}`);
-      }
-    }
-
-    return { canceled: false, characters, worldbooks, errors };
+    return { canceled: false, ...imported };
   });
 
   /**
