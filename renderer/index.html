@@ -385,7 +385,11 @@
 
           <label class="field">
             <span class="field-label">生图模型</span>
-            <input id="s-image-model" type="text" spellcheck="false" placeholder="例如 dall-e-3 / flux-schnell" />
+            <select id="s-image-model" aria-label="生图模型"></select>
+            <span class="field-help">
+              列表跟着上面选的<b>生图服务商</b>走，用的是那个服务商的「可用模型」。<br />
+              里面没有你要的画图模型，就去上面「服务商」那一节把它加进模型列表（或点「拉取可用模型」）。
+            </span>
           </label>
 
           <label class="field">
@@ -436,7 +440,11 @@
 
           <label class="field">
             <span class="field-label">向量模型</span>
-            <input id="s-embedding-model" type="text" spellcheck="false" placeholder="例如 text-embedding-3-small" />
+            <select id="s-embedding-model" aria-label="向量模型"></select>
+            <span class="field-help">
+              同样是跟着上面选的向量服务商走。常见的有 <code>text-embedding-3-small</code>、
+              <code>BAAI/bge-m3</code> 这类。
+            </span>
           </label>
 
           <span class="field-help">

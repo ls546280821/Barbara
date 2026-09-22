@@ -3535,6 +3535,42 @@ async function stopGenerating() {
 //  设置弹窗
 // ---------------------------------------------------------------------------
 
+/**
+ * 填一个「模型」下拉。
+ *
+ * 模型从哪来？就是对应服务商的「可用模型」那一份列表 —— 所以**选了服务商才知道有哪些能选**，
+ * 换服务商得跟着重填。这也是聊天那边模型下拉的同一份数据。
+ *
+ * keepMissing：保存过的模型不在列表里时怎么办。
+ *   · 打开设置时 true —— 补一个选项摆在那儿，免得一打开就被静默改掉
+ *     （换了服务商、或者列表被人删过，都会出现这种情况）
+ *   · 用户主动换服务商时 false —— 老服务商的模型名在新服务商这儿没有意义，直接选第一个
+ */
+function fillModelSelect(select, providerId, current, emptyHint, keepMissing = true) {
+  clear(select);
+
+  const provider = providerById(providerId);
+  const models = provider && Array.isArray(provider.models) ? provider.models.filter(Boolean) : [];
+  const value = String(current || '').trim();
+
+  if (!models.length) {
+    select.appendChild(h('option', { value: '', text: emptyHint }));
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
+  if (keepMissing && value && !models.includes(value)) {
+    select.appendChild(h('option', { value, text: `${value}（不在列表里）` }));
+  }
+  for (const model of models) {
+    select.appendChild(h('option', { value: model, text: model }));
+  }
+
+  // 有保存过的就用它；没有就挑第一个，别让下拉是空的
+  select.value = value || models[0];
+}
+
 function fillSettingsForm(settings) {
   el.s.temp.value = settings.temperature ?? 0.7;
   el.s.maxTokens.value = settings.maxTokens ?? 2048;
@@ -3560,6 +3596,7 @@ function fillSettingsForm(settings) {
     : '';
   el.s.imageModel.value = settings.imageModel || '';
   el.s.imageSize.value = settings.imageSize || '1024x1024';
+  fillModelSelect(el.s.imageModel, el.s.imageProvider.value, settings.imageModel, '（先在左边选一个服务商）');
 
   // 语义检索：同样是一个「不启用」+ 全部服务商
   el.s.ragEnabled.checked = settings.ragEnabled === true;
@@ -3571,7 +3608,7 @@ function fillSettingsForm(settings) {
   el.s.embeddingProvider.value = providers().some((p) => p.id === settings.embeddingProviderId)
     ? settings.embeddingProviderId
     : '';
-  el.s.embeddingModel.value = settings.embeddingModel || '';
+  fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, settings.embeddingModel, '（先在上面选一个服务商）');
 }
 
 // ------------------------------ 服务商编辑 ------------------------------
@@ -3829,6 +3866,11 @@ async function fetchModels() {
     el.p.models.value = capped.join('\n');
     stashProviderForm();
     renderModelSwitch();
+
+    // 模型列表变了，生图 / 向量那两组下拉也要跟着刷新 ——
+    // 刚拉到的列表里可能正好有你要的画图模型
+    fillModelSelect(el.s.imageModel, el.s.imageProvider.value, el.s.imageModel.value, '（先在左边选一个服务商）');
+    fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, el.s.embeddingModel.value, '（先在上面选一个服务商）');
 
     showToast(
       models.length > capped.length
@@ -4564,6 +4606,14 @@ function bindEvents() {
   el.btnSaveSettings.addEventListener('click', () => saveSettings(false));
   el.btnTest.addEventListener('click', testConnection);
   el.btnFetchModels.addEventListener('click', fetchModels);
+
+  // 换服务商 → 模型下拉跟着换（新服务商的列表里没有老模型，所以从第一个开始）
+  el.s.imageProvider.addEventListener('change', () => {
+    fillModelSelect(el.s.imageModel, el.s.imageProvider.value, '', '（先在左边选一个服务商）', false);
+  });
+  el.s.embeddingProvider.addEventListener('change', () => {
+    fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, '', '（先在上面选一个服务商）', false);
+  });
 
   // 「＋ 添加服务商」展开预设列表
   el.btnAddProvider.addEventListener('click', () => {

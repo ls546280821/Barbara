@@ -72,6 +72,9 @@ function setValue(target, value) {
   if (!node) throw new Error(`找不到输入框：${target}`);
   node.value = value;
   node.dispatchEvent(new Event('input', { bubbles: true }));
+  // 下拉框在真实浏览器里会同时触发 input 和 change，这里补齐 ——
+  // 否则「换服务商 → 模型下拉跟着重填」这类只监听 change 的行为就测不到
+  if (node.tagName === 'SELECT') node.dispatchEvent(new Event('change', { bubbles: true }));
   return node;
 }
 
@@ -679,6 +682,14 @@ await scenario('给剧情配图（生图）', async () => {
   );
 
   setValue('#s-image-provider', 'p-img');
+  await sleep(200);
+  // 模型下拉跟着服务商走 —— 这是这次改的重点，得钉住
+  const imgModelOptions = Array.from(byId('s-image-model').options).map((o) => o.value);
+  check(
+    '生图模型是下拉，而且跟着服务商填好',
+    byId('s-image-model').tagName === 'SELECT' && imgModelOptions.length === 1 && imgModelOptions[0] === 'img-model-x',
+    `${byId('s-image-model').tagName} ${JSON.stringify(imgModelOptions)}`
+  );
   setValue('#s-image-model', 'img-model-x');
   setValue('#s-image-size', '1024x1024');
   click('#btn-save-settings');
@@ -1238,6 +1249,13 @@ await scenario('语义检索', async () => {
   check('向量服务商下拉把三个服务商都列上了', embOptions.length === 4 && embOptions.includes('p-emb'), JSON.stringify(embOptions));
 
   setValue('#s-embedding-provider', 'p-emb');
+  await sleep(200);
+  const embModelOptions = Array.from(byId('s-embedding-model').options).map((o) => o.value);
+  check(
+    '向量模型也是下拉，跟着服务商走',
+    byId('s-embedding-model').tagName === 'SELECT' && embModelOptions.length === 1 && embModelOptions[0] === 'emb-model-x',
+    `${byId('s-embedding-model').tagName} ${JSON.stringify(embModelOptions)}`
+  );
   setValue('#s-embedding-model', 'emb-model-x');
   click('#s-rag-enabled');
   await sleep(120);
