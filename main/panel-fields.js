@@ -144,6 +144,37 @@ function normalizePanelField(raw) {
 }
 
 /**
+ * 数值字段的「进度」——给界面画进度条用。
+ *
+ * 返回 { n, total, percent }，percent 是 0~100 的整数。
+ * 算不出来就返回 null（调用方据此不画条）：
+ *   · 不是数值字段 / 没有范围
+ *   · 值里没有可用的数字
+ * 分母的选取：优先用值里写的（60/100 就是 100），
+ * 没有就用字段的 max —— 这样裸数字 60 也能画出条来。
+ */
+function fieldProgress(value, field) {
+  const f = field || {};
+  if (f.type !== 'meter') return null;
+
+  const parsed = parseNumericValue(value);
+  if (!parsed) return null;
+
+  // 分母优先用值里写的（60/100 就是 100），没有就用字段的 max ——
+  // 这样面板里存的是裸数字 60 时也能画出条来。
+  const total = parsed.total !== null ? parsed.total : typeof f.max === 'number' ? f.max : null;
+  if (total === null) return null;
+
+  const base = typeof f.min === 'number' ? f.min : 0;
+  const span = total - base;
+  // 满值 == 下限（范围是个点）时没有「进度」可言，直接给 0 而不是除零
+  if (!isFinite(span) || span === 0) return { n: parsed.n, total, percent: 0 };
+
+  const percent = Math.max(0, Math.min(100, Math.round(((parsed.n - base) / span) * 100)));
+  return { n: parsed.n, total, percent };
+}
+
+/**
  * 把字段按分组分桶，顺序保留。
  *
  * 返回 [{ id, title, fields }]。`id` 空串那一桶是「没分组的」，永远排在最后 ——
@@ -224,6 +255,7 @@ const PanelFields = {
   normalizePanelField,
   normalizePanelFields,
   groupPanelFields,
+  fieldProgress,
   describePanelField
 };
 

@@ -2511,15 +2511,22 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 5px 10px;
   min-height: 0;
+  /* 未分组的字段直接铺在网格里；分组则是各自一块（见 .panel-group） */
+  align-items: start;
 }
 
-.panel-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* 一个分组 = 一块：小标题 + 该组的字段。像他那边的「状态 / 关系 / 背包」分区。 */
+.panel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
 
-/* 分组小标题。.panel-fields 是网格布局，所以这里必须跨整行 ——
-   否则标题只占一格，后面会拖出一片空洞。 */
+.panel-row { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+
+/* 分组小标题 */
 .panel-group-title {
-  grid-column: 1 / -1;
-  margin-top: 3px;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted, var(--text-faint));
@@ -2528,7 +2535,61 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   padding-bottom: 2px;
 }
 
-.panel-group-title:first-child { margin-top: 0; }
+/* 数值字段的进度条。占满整行（因为行允许换行），高 4px 不抢视线。 */
+.panel-bar {
+  flex: 1 0 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  overflow: hidden;
+  margin-top: 1px;
+}
+
+.panel-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.18s ease-out;
+}
+
+/* 列表型字段的项数 */
+.panel-list-count {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* 剧情选项那块：按钮竖着排满整行，点一下就发出去 */
+.panel-options { gap: 4px; }
+
+.panel-option-btn {
+  width: 100%;
+  text-align: left;
+  /* 选项常常是一句话，允许多行；和「帮我想想」的胶囊按钮区分开 */
+  white-space: normal;
+  line-height: 1.35;
+  border-radius: 7px;
+}
+
+/* 角色编辑器里的「剧情选项」配置区 */
+.char-options-box {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.c-options-config {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 22px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+.c-options-config .field { margin: 0; }
 
 /* 数值字段的「/100」后缀：不是可编辑内容，所以挪到输入框外面 */
 .panel-unit {

@@ -43,6 +43,7 @@ const {
   normalizePanelField,
   normalizePanelFields,
   groupPanelFields,
+  fieldProgress,
   describePanelField
 } = require('../main/panel-fields.js');
 // 语义检索的向量工具也用真实现（编解码 / 余弦 / topK 都是它）
@@ -440,8 +441,22 @@ function registerStubs() {
     }
 
     replySeq += 1;
-    const CONTENT = `冒烟测试回复 #${replySeq}：我收到了。**这是加粗**，==这是高亮==。`;
-    const pieces = [`冒烟测试回复 #${replySeq}`, '：我收到了。', '**这是加粗**，', '==这是高亮==。'];
+    let CONTENT = `冒烟测试回复 #${replySeq}：我收到了。**这是加粗**，==这是高亮==。`;
+    let pieces = [`冒烟测试回复 #${replySeq}`, '：我收到了。', '**这是加粗**，', '==这是高亮==。'];
+
+    // 开了「剧情选项」的会话：多回一行状态栏 + 一行选项。
+    // 顺带故意写几个「不听话」的地方（编号、引号、多余空格、重复项），
+    // 测试要能容忍 —— 真模型就是会这么写。
+    const askedForOptions = ((payload && payload.messages) || []).some((m) =>
+      String((m && m.content) || '').includes('【剧情选项】')
+    );
+    if (askedForOptions) {
+      const optionsLine =
+        '【剧情选项】：1.「我想先喝一杯，压压惊」 / 我直接问他叫什么名字 / ' +
+        '3） 我假装什么都没听见，继续吃 / 我想先喝一杯，压压惊 / 这条应该被丢掉（只取前几个）';
+      CONTENT = `${CONTENT}\n\n【好感度】：63/100\n${optionsLine}`;
+      pieces = [...pieces, '\n\n【好感度】：63/100\n', optionsLine];
+    }
 
     for (const piece of pieces) {
       if (!event.sender.isDestroyed()) event.sender.send('chat:chunk', { requestId, text: piece });
@@ -643,6 +658,27 @@ function probeInjection(result) {
     name: '属性：注入里交代了小标题不要当字段输出',
     pass: groupNote,
     detail: groupNote ? '' : '没找到那句交代'
+  });
+
+  // 剧情选项：开了选项的会话要收到「给几个、怎么给、额外要求」这条指令
+  const optBlob = blobs.find((b) => b.includes('【剧情选项】'));
+  const optOk =
+    !!optBlob &&
+    optBlob.includes('给出 3 个选项') &&
+    optBlob.includes('语气轻松些，总有一条冒险的选择') &&
+    optBlob.includes('用「 / 」隔开');
+  result.results.push({
+    name: '剧情选项：数量和额外要求被注入给模型',
+    pass: optOk,
+    detail: optOk ? '' : optBlob ? JSON.stringify(optBlob.slice(optBlob.indexOf('【剧情选项】'), optBlob.indexOf('【剧情选项】') + 200)) : `翻了 ${blobs.length} 次请求都没有选项指令`
+  });
+
+  // 没开选项的会话不该收到这条指令（否则每个会话都白烧 token）
+  const suggestOnly = blobs.filter((b) => !b.includes('【剧情选项】'));
+  result.results.push({
+    name: '剧情选项：没开的会话不会被注入选项指令',
+    pass: suggestOnly.length > 0,
+    detail: `共 ${blobs.length} 次请求，其中 ${suggestOnly.length} 次没带选项指令`
   });
 
   const playerOk = blobs.some((b) => b.includes('【玩家角色：改过的名字】'));
@@ -1319,6 +1355,23 @@ function probePanelFields(result) {
   );
   push('面板分组：全都没分组时只有一个空桶', groupPanelFields([{ name: 'a' }, { name: 'b' }]).length === 1);
   push('面板分组：脏输入不崩', groupPanelFields(null).length === 0 && groupPanelFields([null, undefined]).length === 0);
+
+  // --- 数值字段的进度（他那边的「带范围的进度条」）---
+  const meterDef = { type: 'meter', min: 0, max: 100 };
+  push('进度：60/100 → 60%', JSON.stringify(fieldProgress('60/100', meterDef)) === JSON.stringify({ n: 60, total: 100, percent: 60 }),
+    JSON.stringify(fieldProgress('60/100', meterDef)));
+  push('进度：裸数字也能算（用 max 当满值）', (fieldProgress('20', meterDef) || {}).percent === 20,
+    JSON.stringify(fieldProgress('20', meterDef)));
+  push('进度：越界会被夹在 0~100', (fieldProgress('150/100', meterDef) || {}).percent === 100 &&
+    (fieldProgress('-5/100', meterDef) || {}).percent === 0,
+    `${JSON.stringify(fieldProgress('150/100', meterDef))} ${JSON.stringify(fieldProgress('-5/100', meterDef))}`);
+  push('进度：有下限时按区间算（20~80 里的 50 → 50%）',
+    (fieldProgress('50/80', { type: 'meter', min: 20, max: 80 }) || {}).percent === 50,
+    JSON.stringify(fieldProgress('50/80', { type: 'meter', min: 20, max: 80 })));
+  push('进度：文本字段没有进度', fieldProgress('60', { type: 'text' }) === null);
+  push('进度：算不出数字就没有进度（不瞎画）', fieldProgress('很累', meterDef) === null && fieldProgress('', meterDef) === null);
+  push('进度：没有范围也没有分母时不给进度', fieldProgress('60', { type: 'meter' }) === null);
+  push('进度：范围是个点（max==min）不除零', (fieldProgress('5/5', { type: 'meter', min: 5, max: 5 }) || {}).percent === 0);
 }
 
 /**

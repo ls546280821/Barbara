@@ -442,17 +442,22 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   check('面板里出现了角色属性', panelNames.includes('金币') && panelNames.includes('上衣'), JSON.stringify(panelNames));
   check('带范围的数值属性也在面板里', panelNames.includes('好感度'), JSON.stringify(panelNames));
 
-  // 分组：填了分组的字段，面板上会多一个分组标题行
+  // 分组：填了分组的字段，面板上会多出一块（标题 + 该组字段）
   const groupTitles = $$('#panel-fields .panel-group-title').map((n) => n.textContent);
   check('面板上出现了分组标题', groupTitles.includes('关系'), JSON.stringify(groupTitles));
-  check('没分组的字段不额外加标题（只有 1 个分组头）', groupTitles.length === 1, JSON.stringify(groupTitles));
+  check('没分组的字段不额外加标题（只有 1 个分组块）', groupTitles.length === 1, JSON.stringify(groupTitles));
   {
-    const kids = Array.from(byId('panel-fields').children).map((n) =>
-      n.classList.contains('panel-group-title') ? `#${n.textContent}` : n.querySelector('.panel-name').textContent
+    // 分组块里只装它自己那组的字段
+    const group = $$('#panel-fields .panel-group').find(
+      (g) => g.querySelector('.panel-group-title').textContent === '关系'
     );
-    const gi = kids.indexOf('#关系');
-    const fi = kids.indexOf('好感度');
-    check('分组标题排在它那一组的字段前面', gi >= 0 && fi > gi, JSON.stringify(kids));
+    const inGroup = group ? Array.from(group.querySelectorAll('.panel-row .panel-name')).map((n) => n.textContent) : [];
+    check('分组块里装着这一组的字段', inGroup.join(',') === '好感度', JSON.stringify(inGroup));
+    // 没分组的字段留在顶层，没被吸进分组块
+    const strayInGroup = $$('#panel-fields .panel-group').some((g) =>
+      Array.from(g.querySelectorAll('.panel-name')).some((n) => n.textContent === '金币')
+    );
+    check('没分组的字段没被吸进分组块', !strayInGroup);
   }
 
   // 数值字段的「/100」被拆成后缀显示，输入框里只剩分子
@@ -467,6 +472,26 @@ await scenario('属性：从角色卡种到状态面板', async () => {
       '输入框里只有分子（分母挪到后缀了）',
       !!favorRow && favorRow.querySelector('.panel-value').value === '20',
       favorRow ? favorRow.querySelector('.panel-value').value : '没找到'
+    );
+    // 他那边的数值字段是「带范围的进度条」——这里验真有进度条且比例对
+    const bar = favorRow && favorRow.querySelector('.panel-bar');
+    check('数值字段有进度条', !!bar, favorRow ? favorRow.innerHTML.slice(0, 120) : '没找到');
+    if (bar) {
+      const fill = bar.querySelector('.panel-bar-fill');
+      check(
+        '进度条比例对（20/100 → 20%）',
+        fill.style.width === '20%',
+        `width=${fill.style.width}`
+      );
+      check(
+        '进度条带了无障碍的数值信息',
+        bar.getAttribute('aria-valuenow') === '20' && bar.getAttribute('aria-valuemax') === '100',
+        JSON.stringify({ now: bar.getAttribute('aria-valuenow'), max: bar.getAttribute('aria-valuemax') })
+      );
+    }
+    check(
+      '文本字段没有进度条',
+      !panelRows.find((r) => r.querySelector('.panel-name').textContent === '金币').querySelector('.panel-bar')
     );
   }
 
@@ -1868,6 +1893,128 @@ await scenario('导入：重发 id 时绑定要跟着走', async () => {
     }
     check('空输入返回空结果', emptyOk);
   }
+});
+
+// ---------------------------------------------------------------------------
+//  场景 21：剧情选项（每轮给几个可点选项，点一下就当玩家回复发出去）
+//
+//  这是「互动模板」里最特别的一块：选项不是一次性的建议，而是常驻在状态面板里、
+//  每轮由模型跟着状态栏一起更新，玩家点一下就当作自己说了那句话。
+// ---------------------------------------------------------------------------
+await scenario('剧情选项', async () => {
+  // --- 1) 在角色编辑器里开剧情选项 ---
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click('#btn-new-char');
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+
+  const NAME = '选项测试角色';
+  setValue('#c-name', NAME);
+  await sleep(80);
+
+  check('默认不开剧情选项', byId('c-options-on').checked === false, String(byId('c-options-on').checked));
+  check('关着时配置区是收起的', !shown('#c-options-config'));
+
+  click('#c-options-on');
+  await waitFor('配置区展开', () => shown('#c-options-config'));
+  setValue('#c-options-count', '3');
+  setValue('#c-options-hint', '语气轻松些，总有一条冒险的选择');
+
+  click('#btn-save-char');
+  await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色', 8000);
+  await sleep(150);
+
+  const saved = await savedCharacters();
+  const mine = saved.find((c) => c.name === NAME);
+  check(
+    '选项配置落盘了（没被白名单丢掉）',
+    !!mine && !!mine.optionsSpec && mine.optionsSpec.count === 3 && mine.optionsSpec.hint === '语气轻松些，总有一条冒险的选择',
+    JSON.stringify(mine && mine.optionsSpec)
+  );
+
+  // --- 2) 用这个角色开一个会话 → 配置该跟过来 ---
+  click('#btn-close-chars');
+  await sleep(150);
+  const card = $$('#char-page-grid .char-card').find((c) => String(c.textContent || '').includes(NAME));
+  check('新角色出现在列表里', !!card);
+  click(buttonByText(card, '聊天'));
+  await waitFor('切到聊天视图', () => shown('#view-chat'), 8000);
+  await sleep(300);
+
+  // --- 3) 发一条 → 回复里带选项 → 面板出现可点按钮 ---
+  setValue('#input', '选项测试：随便说点什么');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 12000);
+  await sleep(300);
+
+  // 面板默认收起 → 展开
+  if (byId('panel-box').classList.contains('collapsed')) {
+    click('#btn-panel-collapse');
+    await sleep(200);
+  }
+  const optionBtns = $$('#panel-fields .panel-option-btn');
+  check('面板里出现了剧情选项按钮', optionBtns.length > 0, `实际 ${optionBtns.length} 个`);
+  check(
+    '选项标题在',
+    $$('#panel-fields .panel-group-title').some((n) => n.textContent === '剧情选项'),
+    JSON.stringify($$('#panel-fields .panel-group-title').map((n) => n.textContent))
+  );
+
+  const texts = optionBtns.map((b) => b.textContent);
+  check(
+    '序号和引号都被剥掉了（模型爱带，得容忍）',
+    texts.includes('我想先喝一杯，压压惊') && texts.includes('我直接问他叫什么名字'),
+    JSON.stringify(texts)
+  );
+  check('重复的选项只留一个', texts.filter((t) => t === '我想先喝一杯，压压惊').length === 1, JSON.stringify(texts));
+
+  // 选项行不该留在消息气泡里（它已经变成按钮了）
+  const bodyText = byId('messages').textContent;
+  check('消息正文里看不到「【剧情选项】：」原文', !bodyText.includes('【剧情选项】：'), bodyText.slice(-160));
+  check('状态栏原文也不在气泡里', !bodyText.includes('【好感度】：63/100'), bodyText.slice(-160));
+
+  // 这一轮的状态栏也照常被面板收下（选项和状态栏是一起回来的）
+  check(
+    '同一条回复里的状态栏也被面板收下了',
+    $$('#panel-fields .panel-name').some((n) => n.textContent === '好感度'),
+    JSON.stringify($$('#panel-fields .panel-name').map((n) => n.textContent))
+  );
+
+  // --- 4) 点一个选项 → 当作玩家回复发出去，选项消失 ---
+  const beforeCount = $$('#messages .msg').length;
+  const pick = optionBtns[0];
+  const pickText = pick.textContent;
+  click(pick);
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 12000);
+  await sleep(300);
+
+  const userMsgs = $$('#messages .msg')
+    .filter((m) => m.classList.contains('user'))
+    .map((m) => m.textContent);
+  check(
+    '点选项真的把它当玩家回复发出去了',
+    userMsgs.some((t) => t.includes(pickText)),
+    JSON.stringify(userMsgs.slice(-3))
+  );
+  check('消息确实变多了', $$('#messages .msg').length > beforeCount, `${beforeCount} → ${$$('#messages .msg').length}`);
+
+  // 用过就清掉、然后由**新一轮**的回复重新填上 —— 所以点完之后不该还是
+  // 「刚才那一批旧选项」，而应该是新一批。这里验的是「没有把旧选项留着重复点」：
+  // 点完立刻发消息，假后端会再给一批，所以只能验「选项内容仍然是干净的」。
+  const convos = await window.barbara.getConversations();
+  const active = convos.conversations.find((c) => c.id === convos.activeId);
+  check(
+    '点完选项后选项区仍然干净（要么空、要么是新一轮给的）',
+    !!active && Array.isArray(active.options) && active.options.every((t) => typeof t === 'string' && t.trim() && !t.includes('【')),
+    JSON.stringify(active && active.options)
+  );
+  check(
+    '选项按钮个数没有越堆越多（被 MAX_OPTIONS 夹住）',
+    !!active && active.options.length <= 6,
+    `实际 ${active && active.options.length}`
+  );
+  check('配置本身还在（下一轮还会给新选项）', !!active && !!active.optionsSpec && active.optionsSpec.count === 3,
+    JSON.stringify(active && active.optionsSpec));
 });
 
 return { results, notes, hoverProbe };

@@ -45,6 +45,7 @@ const {
   normalizePanelField,
   normalizePanelFields,
   groupPanelFields,
+  fieldProgress,
   describePanelField,
   parseNumericValue,
   trimNumber
@@ -600,6 +601,11 @@ async function applyCharacterChoice(characterId) {
   seedIdentity(convo, next.name, next);
   seedPanelFromCharacters(convo, [next]);
 
+  // 剧情选项：角色卡上开了就跟着这个会话生效。用的是**复制**而不是引用 ——
+  // 之后改角色卡不该悄悄改掉正在进行的这一局。
+  convo.optionsSpec = next.optionsSpec ? { ...next.optionsSpec } : null;
+  if (!convo.optionsSpec) convo.options = [];
+
   if (next.firstMes && untouched) {
     // 空对话绑上带开场白的角色时，自动把开场白放进去，省得每次手动开个头
     convo.messages = [
@@ -764,7 +770,13 @@ function messageNode(message, index, character, labels) {
   if (isUser || isError) {
     content.textContent = message.content;
   } else {
-    content.innerHTML = renderMarkdown(message.content);
+    // 气泡里也要剥掉「状态栏行」和「剧情选项行」：
+    //   · 状态值已经由面板权威持有并在顶部常驻显示，正文里再来一份是重复的；
+    //   · 选项已经变成可点的按钮了，原文留着只会吵。
+    // （换候选时靠面板里的输入框看当前值，不靠正文。）
+    content.innerHTML = renderMarkdown(
+      cleanAssistantText(message.content, convoPanelFields(activeConvo()))
+    );
   }
 
   // 图片放在文字上面 —— 先看图再看说话，跟聊天软件的习惯一致
@@ -978,6 +990,10 @@ function createConvo(activate) {
     panel: {},
     panelFields: [],
     panelDefs: {},
+    // 剧情选项：options 是这一轮模型给的可点选项（点完就清），
+    // optionsSpec 是「每轮给几个 + 额外要求」，null = 这个会话不开剧情选项。
+    options: [],
+    optionsSpec: null,
     // 视角设置：叙述模式（标准/内心描写/上帝视角）、推进节奏、GM 模式
     narrationMode: DEFAULT_NARRATION_MODE,
     // 默认「一步一步」：不这样的话模型会一口气把整场戏演完，玩家只剩看的份
@@ -1191,6 +1207,27 @@ function collapseBlankLines(text) {
   return String(text || '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * 把「【剧情选项】：…」这一行剥掉。
+ * 它和状态栏一样是给程序读的：程序把它解析成按钮之后，正文里再留一份
+ * 就是重复（选项已经是可点的按钮了，原文留在气泡里只会吵）。
+ */
+function stripOptionsLine(text) {
+  const source = String(text || '');
+  if (!source.includes(OPTIONS_LABEL)) return source;
+
+  const out = source.split('\n').filter((rawLine) => !OPTIONS_LINE_RE.test(rawLine.trim()));
+  return collapseBlankLines(out.join('\n')).trim();
+}
+
+/**
+ * 助手消息的正文该怎么给模型/界面看：状态栏行和剧情选项行都剥掉。
+ * 两者都是程序读的中间产物 —— 值已经由面板权威注入，选项已经变成按钮。
+ */
+function cleanAssistantText(text, panelFields) {
+  return stripOptionsLine(stripPanelLines(text, panelFields));
 }
 
 function convoPanelFields(convo) {
@@ -1691,7 +1728,9 @@ function attachPanelEditor(convo, name, input) {
 function renderPanel() {
   const convo = activeConvo();
   const fields = convo ? convoPanelFields(convo) : [];
-  const hasPanel = fields.length > 0;
+  const options = convo && Array.isArray(convo.options) ? convo.options : [];
+  // 有字段、或有剧情选项，面板就该出现 —— 只开了剧情选项的会话也要有地方点
+  const hasPanel = fields.length > 0 || options.length > 0;
 
   // 收起后不整块藏起来，只留标题那一条 —— 否则「能点开」这件事就没人看得见了
   el.panelBox.classList.toggle('hidden', !hasPanel);
@@ -1706,7 +1745,7 @@ function renderPanel() {
 
   const panel = convoPanel(convo);
   const filled = fields.filter((n) => String(panel[n] || '').trim()).length;
-  el.panelHint.textContent = `${filled}/${fields.length} 项已填`;
+  el.panelHint.textContent = fields.length ? `${filled}/${fields.length} 项已填` : '每轮自动更新';
 
   // 面板里某个输入框正在编辑时不要重建 DOM，否则光标和输入内容会被打断
   const editing = currentPanelTextarea();
@@ -1714,20 +1753,62 @@ function renderPanel() {
 
   clear(el.panelFields);
 
-  // 按分组铺：有名字的组各给一个标题行，没分组的字段直接铺（不额外加标题）——
-  // 老会话没有分组，看到的和以前一模一样。
+  // 剧情选项排在字段前面：它是「下一步做什么」，比状态数字更该先看到
+  if (options.length) appendOptionsBlock(convo, options, el.panelFields);
+
+  // 按分组铺：每个分组自己一块（标题 + 该组的字段），没分组的字段直接铺在
+  // 顶层、不额外加标题 —— 老会话没有分组，看到的和以前一模一样。
   const buckets = groupPanelFields(
     fields.map((name) => ({ name, group: (convoPanelDef(convo, name) || {}).group || '' }))
   );
 
   for (const bucket of buckets) {
-    if (bucket.id) {
-      el.panelFields.appendChild(
-        h('div', { class: 'panel-group-title', text: bucket.id, title: bucket.id })
-      );
-    }
-    for (const { name } of bucket.fields) appendPanelRow(convo, name, panel[name], el.panelFields);
+    const host = bucket.id
+      ? h(
+          'div',
+          { class: 'panel-group' },
+          h('div', { class: 'panel-group-title', text: bucket.id, title: bucket.id })
+        )
+      : el.panelFields;
+
+    for (const { name } of bucket.fields) appendPanelRow(convo, name, panel[name], host);
+    if (bucket.id) el.panelFields.appendChild(host);
   }
+}
+
+/**
+ * 剧情选项那块：一行标题 + 几个按钮，点一下就当作玩家回复发出去。
+ * 按钮文字就是选项本身（和「帮我想想」的样式共用 .suggest-btn）。
+ */
+function appendOptionsBlock(convo, options, container) {
+  const block = h(
+    'div',
+    { class: 'panel-group panel-options' },
+    h('div', { class: 'panel-group-title', text: '剧情选项', title: '点一下，就当你说这句话发出去' })
+  );
+
+  for (const text of options) {
+    const btn = h('button', {
+      type: 'button',
+      class: 'suggest-btn panel-option-btn',
+      text,
+      title: '点一下，就当你说这句话发出去',
+      onClick: () => pickOption(convo, text)
+    });
+    block.appendChild(btn);
+  }
+
+  container.appendChild(block);
+}
+
+/** 列表型字段里有几项（按「、」和「,」切；空值算 0 项） */
+function listItemCount(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return 0;
+  return text
+    .split(/[、,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean).length;
 }
 
 /** 铺一行「字段名 + 值输入框 + 删除」 */
@@ -1749,21 +1830,44 @@ function appendPanelRow(convo, name, value, container) {
   const unit = parsed && parsed.total !== null ? `/${trimNumber(parsed.total)}` : '';
   if (unit) input.value = trimNumber(parsed.n);
 
-  container.appendChild(
-    h(
-      'div',
-      { class: 'panel-row' },
-      h('span', { class: 'panel-name', text: name, title: name }),
-      input,
-      unit ? h('span', { class: 'panel-unit', text: unit }) : null,
-      button({
-        class: 'panel-del',
-        text: '✕',
-        title: '从面板里移除这个字段',
-        onClick: () => removePanelField(convo, name)
-      })
-    )
+  const row = h(
+    'div',
+    { class: 'panel-row' },
+    h('span', { class: 'panel-name', text: name, title: name }),
+    input,
+    unit ? h('span', { class: 'panel-unit', text: unit }) : null,
+    // 列表类型：显示有几项，提醒它是「多项用、隔开」而不是一句话
+    def && def.type === 'list'
+      ? h('span', {
+          class: 'panel-list-count',
+          text: listItemCount(value) > 0 ? `${listItemCount(value)} 项` : '空',
+          title: '多项用「、」隔开'
+        })
+      : null,
+    button({
+      class: 'panel-del',
+      text: '✕',
+      title: '从面板里移除这个字段',
+      onClick: () => removePanelField(convo, name)
+    })
   );
+
+  // 数值字段补一条进度条 —— 光看「60/100」不知道离满还有多远。
+  const progress = fieldProgress(String(value == null ? '' : value), def);
+  if (progress) {
+    const bar = h(
+      'div',
+      { class: 'panel-bar', role: 'progressbar' },
+      h('div', { class: 'panel-bar-fill' })
+    );
+    bar.setAttribute('aria-valuenow', String(progress.n));
+    bar.setAttribute('aria-valuemin', String(typeof def.min === 'number' ? def.min : 0));
+    bar.setAttribute('aria-valuemax', String(progress.total));
+    bar.querySelector('.panel-bar-fill').style.width = `${progress.percent}%`;
+    row.appendChild(bar);
+  }
+
+  container.appendChild(row);
 }
 
 function removePanelField(convo, name) {
@@ -1788,6 +1892,10 @@ function resetPanel() {
 
   convo.panel = {};
   convo.panelFields = [];
+  // 字段定义也一起清掉 —— 留着它，字段重新出现时会带着旧范围，容易莫名其妙
+  convo.panelDefs = {};
+  // 这一轮攒的选项同样作废（面板都清了，留着几个按钮没有对应状态）
+  convo.options = [];
   convo.updatedAt = now();
   renderAll();
   persistConversations(0);
@@ -2239,13 +2347,15 @@ function closeMemoryModal() {
 // 存档点上限。每份都是一整段对话的副本，攒多了会把 conversations.json 撑大
 const MAX_CHECKPOINTS = 12;
 
-/** 深拷一份存档点内容（消息 / 面板 / 面板字段定义 / 摘要 / 玩家角色） */
+/** 深拷一份存档点内容（消息 / 面板 / 面板字段定义 / 剧情选项 / 摘要 / 玩家角色） */
 function snapshotConvo(convo) {
   return {
     messages: JSON.parse(JSON.stringify(convo.messages || [])),
     panel: { ...(convoPanel(convo) || {}) },
     panelFields: [...convoPanelFields(convo)],
     panelDefs: JSON.parse(JSON.stringify(convoPanelDefs(convo))),
+    options: [...(Array.isArray(convo.options) ? convo.options : [])],
+    optionsSpec: convo.optionsSpec ? { ...convo.optionsSpec } : null,
     summaries: JSON.parse(JSON.stringify(convoSummaries(convo))),
     player: convo.player ? { ...convo.player } : null
   };
@@ -2298,6 +2408,8 @@ async function restoreCheckpoint(id) {
   convo.panel = data.panel || {};
   convo.panelFields = data.panelFields || [];
   convo.panelDefs = normalizePanelDefs(data.panelDefs);
+  convo.options = Array.isArray(data.options) ? data.options : [];
+  convo.optionsSpec = data.optionsSpec || null;
   convo.summaries = data.summaries || [];
   if (data.player) convo.player = data.player;
   convo.updatedAt = now();
@@ -2398,6 +2510,9 @@ function branchFromMessage(index) {
     panel: { ...convoPanel(convo) },
     // 字段的范围/hint 也要跟着分叉走，否则新线的数值从此不再受约束
     panelDefs: JSON.parse(JSON.stringify(convoPanelDefs(convo))),
+    // 剧情选项配置跟着走；这一轮的选项本身不搬（新线还没生成过）
+    optionsSpec: convo.optionsSpec ? { ...convo.optionsSpec } : null,
+    options: [],
     messages: JSON.parse(JSON.stringify(convo.messages.slice(0, cut))),
     // 摘要不搬：它压缩的是「最早那批消息」，而新会话里这批消息是原样留着的，
     // 搬过去等于同一段内容被记两遍。新线从零开始攒记忆。
@@ -3223,7 +3338,7 @@ async function illustrateMessage(index) {
   }
 
   const panelFields = convoPanelFields(convo);
-  const raw = stripPanelLines(String(message.content || ''), panelFields);
+  const raw = cleanAssistantText(String(message.content || ''), panelFields);
   // 去掉 markdown 标记和括号里的旁白符号，让提示词更像一句画面描述
   const prompt = raw
     .replace(/\*\*|==|~~|[*_`#>]/g, '')
@@ -3406,6 +3521,136 @@ function hideSuggestions() {
   el.suggestStrip.classList.add('hidden');
   el.suggestList.innerHTML = '';
   suggestionsConvoId = null;
+}
+
+// ---------------------------------------------------------------------------
+//  剧情选项（每轮由模型给出、玩家点一下就当作回复发出去）
+//
+//  和上面「帮我想想」的区别：
+//    · 帮我想想 是**额外发一次请求**，一次性给几个建议，不算常驻功能；
+//    · 剧情选项 是**面板的一部分** —— 跟状态栏一起在正文里输出，不用多发请求，
+//      每轮都更新，选项常驻在面板里。
+//
+//  选项为什么不做成普通面板字段（【剧情选项】：A / B / C）：
+//  面板字段的值是「一个字符串」，而选项是**可变长的列表**，还要逐个变成按钮。
+//  塞进字段里就得再切一次、还得处理玩家手改这种字段的边界情况，不如单独一条
+//  指令 + 单独的解析（下面这段），语义清楚也不互相干扰。
+// ---------------------------------------------------------------------------
+
+/** 选项行的栏目标记，和「【心理】」一个套路 */
+const OPTIONS_LABEL = '剧情选项';
+const OPTIONS_LINE_RE = /^【剧情选项】[：:]\s*(.*)$/;
+// 一条选项最多多少字 —— 点下去要当消息发出去，不能变成小作文
+const MAX_OPTION_CHARS = 120;
+// 一屏最多几个（模型给多了会挤爆面板）
+const MAX_OPTIONS = 6;
+
+/** 当前会话要不要每轮出剧情选项（存在会话上，跟面板走） */
+function convoOptionsSpec(convo) {
+  const spec = convo && convo.optionsSpec;
+  if (!spec || typeof spec !== 'object') return null;
+  const count = Math.max(1, Math.min(MAX_OPTIONS, Math.round(Number(spec.count) || 3)));
+  return { count, hint: String(spec.hint || '').trim().slice(0, 200) };
+}
+
+/**
+ * 从模型回复里抽选项。
+ * 只认**最后一段**「【剧情选项】：」—— 模型有时会先说一遍再重写，
+ * 取最后的才是最终答案。返回空数组表示这轮没给（那就保持上一轮的）。
+ */
+function extractOptionsFromText(text) {
+  const lines = String(text || '').split('\n');
+  let tail = null;
+
+  for (const raw of lines) {
+    const m = raw.trim().match(OPTIONS_LINE_RE);
+    if (m) tail = m[1];
+  }
+  if (tail === null) return [];
+
+  const out = [];
+  // 只认「/」「｜」这类**明确的分隔符**。
+  // 不能拿顿号/逗号来切 —— 选项本身就是中文句子，里面天然带「，」，
+  // 一切就把「我想先喝一杯，压压惊」拆成两条没头没尾的碎片（实测踩过）。
+  for (const piece of tail.split(/[\/｜|]/)) {
+    let item = piece.trim();
+    if (!item) continue;
+    // 容忍「1. 」「① 」「- 」这类前缀和包在引号里
+    item = item.replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '').replace(/^[①-⑳]\s*/, '');
+    item = item.replace(/^[「『"'“”‘’]+/, '').replace(/[」』"'“”‘’]+$/, '').trim();
+    if (!item) continue;
+    if (item.length > MAX_OPTION_CHARS) item = `${item.slice(0, MAX_OPTION_CHARS)}…`;
+    if (!out.includes(item)) out.push(item);
+    if (out.length >= MAX_OPTIONS) break;
+  }
+
+  return out;
+}
+
+/** 注入给模型的选项指令（有配置时才注入） */
+function optionsInstruction(convo) {
+  const spec = convoOptionsSpec(convo);
+  if (!spec) return '';
+
+  const lines = [
+    '【剧情选项】',
+    `在正文和状态栏之后，另起一行，用「${OPTIONS_LABEL}：A / B / C」的格式给出 ${spec.count} 个选项，` +
+      '每个选项之间用「 / 」隔开（就这一行，不要编号、不要再分多行）。',
+    '每个选项是玩家接下来可以**直接说出口或做出来**的动作/台词，用玩家第一人称，' +
+      `每条一句话以内（不超过 ${MAX_OPTION_CHARS} 字）。`,
+    '选项之间要明显不同（不同的态度、做法或对象），不要是同一件事的不同说法。'
+  ];
+  if (spec.hint) lines.push(`额外要求：${spec.hint}`);
+  return lines.join('\n');
+}
+
+/**
+ * 把最近一条带选项的回复里的选项同步到会话上。
+ *
+ * 规则：
+ *   · 找到**最近**一条提到选项的助手消息就用它 —— 和状态栏一样「最新一轮说了算」；
+ *   · 一条都没有就清空（这轮没给，就别把上一轮的旧选项留在面板上误导玩家）；
+ *   · 没开剧情选项的会话直接清空并返回。
+ * 返回是否发生了变化。
+ */
+function syncConvoOptions(convo) {
+  if (!convo || !Array.isArray(convo.messages)) return false;
+
+  const before = JSON.stringify(convo.options || []);
+  let found = null;
+
+  if (convoOptionsSpec(convo)) {
+    for (let i = convo.messages.length - 1; i >= 0; i -= 1) {
+      const msg = convo.messages[i];
+      if (!msg || msg.role !== 'assistant') continue;
+      const content = String(msg.content || '');
+      if (!content.includes(OPTIONS_LABEL)) continue;
+      const items = extractOptionsFromText(content);
+      if (items.length) {
+        found = items;
+        break;
+      }
+    }
+  }
+
+  convo.options = found || [];
+  return before !== JSON.stringify(convo.options);
+}
+
+/** 玩家点了某个剧情选项：当作他说了这句话发出去 */
+function pickOption(convo, text) {
+  if (!convo || !text) return;
+  if (state.streaming) {
+    showToast('正在生成，等它写完再选');
+    return;
+  }
+  // 用过就清掉 —— 它是「这一轮的选项」，点完就该消失，不能留着重复点
+  convo.options = [];
+  hideSuggestions();
+  renderPanel();
+  el.input.value = text;
+  autoGrowInput();
+  sendMessage(text);
 }
 
 function renderSuggestions(options) {
@@ -3647,7 +3892,7 @@ function buildApiMessages(convo, worldbookSection, ragSection) {
   const panelFields = convoPanelFields(convo);
   for (const m of recent) {
     const raw = applyMacros(m.content, character, me);
-    const text = m.role === 'assistant' ? stripPanelLines(raw, panelFields) : raw;
+    const text = m.role === 'assistant' ? cleanAssistantText(raw, panelFields) : raw;
     const images = messageImages(m);
 
     // 带图的用户消息要发成多模态数组 —— 这是 OpenAI 那套的通用写法，
@@ -3669,6 +3914,11 @@ function buildApiMessages(convo, worldbookSection, ragSection) {
   // 面板一旦被截出去，模型就开始凭感觉编数值。
   const panelText = formatPanelForPrompt(convo);
   if (panelText) messages.push({ role: 'system', content: panelText });
+
+  // ---- 5b. 剧情选项：和面板同一批（都是「这轮要维护的状态」）----
+  // 只在这张卡/这个会话开了剧情选项时才注入。
+  const optionsText = optionsInstruction(convo);
+  if (optionsText) messages.push({ role: 'system', content: optionsText });
 
   // ---- 6. 对话后指令 ----
   if (character && String(character.postHistoryInstructions || '').trim()) {
@@ -3777,6 +4027,7 @@ function editMessage(index) {
       convo.updatedAt = now();
       // 助手消息里可能写着状态栏，改完要重新扫一遍面板
       if (message.role === 'assistant') syncConvoPanel(convo);
+      if (message.role === 'assistant') syncConvoOptions(convo);
       if (message.role === 'assistant') syncPlayerNameFromPanel(convo);
       persistConversations(0);
       showToast('已保存', 'ok');
@@ -3886,6 +4137,7 @@ async function continueLastMessage() {
       last.variants[last.variantIndex] = last.content;
     }
     syncConvoPanel(convo);
+    syncConvoOptions(convo);
     renderAll({ forceScroll: true });
     persistConversations();
     el.input.focus();
@@ -4009,6 +4261,7 @@ async function requestCompletion(convo, options) {
     // 回复写完了，从里面抽出状态栏存到会话上 —— 下一轮由程序权威注入，
     // 不再依赖模型去抄历史（历史会被 maxTurns 截断）。
     syncConvoPanel(convo);
+    syncConvoOptions(convo);
     // 剧情要是把你的名字改了，消息标签和 {{user}} 也得跟着改
     syncPlayerNameFromPanel(convo);
     renderAll({ forceScroll: true });
@@ -4076,6 +4329,7 @@ function switchVariant(index, delta) {
 
   // 不同候选里写的状态栏可能不一样，换完重新扫一遍
   syncConvoPanel(convo);
+  syncConvoOptions(convo);
   renderAll({ forceScroll: false });
   persistConversations(0);
 }
@@ -5517,6 +5771,9 @@ function bindEvents() {
   el.c.wbAddBtn.addEventListener('click', openWorldbookPicker);
   el.c.btnAttrPasteApply.addEventListener('click', applyAttrPaste);
 
+  // 剧情选项的开关：只切配置区的显示，值在保存时才写回角色卡
+  if (el.c.optionsOn) el.c.optionsOn.addEventListener('change', renderOptionsConfig);
+
   el.btnDelChar.addEventListener('click', deleteCharacter);
   el.btnExportChar.addEventListener('click', exportCharacter);
   el.btnExportConvo.addEventListener('click', exportConversation);
@@ -6485,9 +6742,22 @@ function fillCharForm(character) {
   charAttrs = characterAttrs(character);
   renderCharAttrs();
 
+  // 剧情选项：这张卡开没开、给几个、有什么额外要求
+  const optSpec = character.optionsSpec && typeof character.optionsSpec === 'object' ? character.optionsSpec : null;
+  el.c.optionsOn.checked = !!optSpec;
+  el.c.optionsCount.value = String(optSpec ? optSpec.count || 3 : 3);
+  el.c.optionsHint.value = optSpec ? optSpec.hint || '' : '';
+  renderOptionsConfig();
+
   el.charFootHint.textContent = charFootHintText(character);
 
   showCharForm(true);
+}
+
+/** 剧情选项的配置区：开关关着就整块收起来（省得看着以为在生效） */
+function renderOptionsConfig() {
+  if (!el.c.optionsConfig) return;
+  el.c.optionsConfig.classList.toggle('hidden', !el.c.optionsOn.checked);
 }
 
 /** 角色自带世界书那一块：没有绑书就整块藏起来 */
@@ -7186,6 +7456,15 @@ function stashCharForm() {
     })
     .slice(0, MAX_PANEL_FIELDS);
   character.avatar = charDraftAvatar;
+  // 剧情选项：开关关掉就写 null（不是 false/空对象）—— 一眼能看出「这个会话不开」。
+  // 数量夹在 1~6，和注入时用的上限保持一致。
+  if (el.c.optionsOn.checked) {
+    const raw = Number(el.c.optionsCount.value);
+    const count = isFinite(raw) ? Math.max(1, Math.min(6, Math.round(raw))) : 3;
+    character.optionsSpec = { count, hint: el.c.optionsHint.value.trim().slice(0, 200) };
+  } else {
+    character.optionsSpec = null;
+  }
   // 角色自带世界书的开关（草稿）。没有绑书时不写这个字段，
   // 免得给没有书的角色平白加一个属性。
   if ((character.worldbookIds || []).length) {
@@ -7555,8 +7834,10 @@ async function init() {
   // 只在真有坏数据时才重写这个键，免得给所有老会话平白加上一个空对象。
   for (const convo of state.conversations) {
     if (!convo || typeof convo !== 'object') continue;
-    if (convo.panelDefs === undefined) continue;
-    convo.panelDefs = normalizePanelDefs(convo.panelDefs);
+    if (convo.panelDefs !== undefined) convo.panelDefs = normalizePanelDefs(convo.panelDefs);
+    // 选项是程序写进去的，读盘时只要保证形状对（不是数组就当没有）
+    if (!Array.isArray(convo.options)) convo.options = [];
+    if (convo.optionsSpec && typeof convo.optionsSpec !== 'object') convo.optionsSpec = null;
   }
 
   if (!state.conversations.length) {

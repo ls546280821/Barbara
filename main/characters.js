@@ -20,6 +20,11 @@ const MAX_AVATAR_CHARS = 18000000; // ≈ 13MB 的 PNG，留足余量
 // 属性归一化用共享的那一份（主进程 / 渲染层 / 冒烟测试同一份）
 const { normalizePanelFields } = require('./panel-fields.js');
 
+// 剧情选项：每轮给几个。上下限和渲染层的 MAX_OPTIONS 对齐。
+const MIN_OPTIONS = 1;
+const MAX_OPTIONS = 6;
+const DEFAULT_OPTIONS = 3;
+
 // 角色「属性」的条数上限，和渲染层状态面板的 MAX_PANEL_FIELDS 保持一致
 const MAX_ATTRIBUTES = 120;
 
@@ -63,6 +68,21 @@ function normalizeGender(value) {
 }
 
 /**
+ * 剧情选项的配置归一化。
+ * 没有 / 形状不对 / 明确关掉（false）一律给 null —— 调用方只要判空即可，
+ * 不用再区分「没有这个字段」和「关掉了」。
+ */
+function normalizeOptionsSpec(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+  const raw = Number(value.count);
+  const count = isFinite(raw) ? Math.max(MIN_OPTIONS, Math.min(MAX_OPTIONS, Math.round(raw))) : DEFAULT_OPTIONS;
+  const hint = typeof value.hint === 'string' ? value.hint.trim().slice(0, 200) : '';
+
+  return { count, hint };
+}
+
+/**
  * 角色「属性」：一串 { name, type, value, min?, max?, hint? }，名字去重，顺序保留。
  *
  * 归一化本身交给 main/panel-fields.js —— 那个模块主进程、渲染层、冒烟测试
@@ -102,6 +122,8 @@ function normalizeCharacter(raw, source) {
       : [],
     // 状态面板的字段模板。少了这一行，界面上填的属性一存盘就没了。
     attributes: normalizeAttributes(r.attributes),
+    // 剧情选项的配置（每轮给几个 + 额外要求）。null = 这张卡不开剧情选项。
+    optionsSpec: normalizeOptionsSpec(r.optionsSpec),
     // 角色自带的世界书。导入带 character_book 的角色卡时自动绑上，
     // 之后用户也能自己加/删。
     worldbookIds: normalizeWorldbookIds(r.worldbookIds),
@@ -117,6 +139,7 @@ function normalizeCharacter(raw, source) {
 module.exports = {
   normalizeCharacter,
   normalizeAttributes,
+  normalizeOptionsSpec,
   normalizeGender,
   normalizeWorldbookIds,
   newCharacterId,

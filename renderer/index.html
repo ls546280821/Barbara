@@ -606,6 +606,26 @@
                 这些属性会进游玩时的「状态」面板，每轮由程序注入给 AI，数值不会漂。<br />
                 这里填的是<b>初始值</b>；进游戏之后在面板里改的是<b>这一局的当前值</b>，不会动到角色卡。
               </span>
+
+              <!-- 剧情选项：每轮让 AI 给出几个可点选项，点一下就当玩家回复发出去。
+                   关掉时这个角色的会话就没有选项区。 -->
+              <div class="char-options-box">
+                <label class="check">
+                  <input id="c-options-on" type="checkbox" />
+                  <span>剧情选项（每轮给几个可点选项，点一下就当你说这句话发出去）</span>
+                </label>
+                <div id="c-options-config" class="c-options-config hidden">
+                  <label class="field">
+                    <span class="field-label">每轮给几个</span>
+                    <input id="c-options-count" type="number" min="1" max="6" step="1" value="3" />
+                  </label>
+                  <label class="field field-stack">
+                    <span class="field-label">额外要求（可选）</span>
+                    <input id="c-options-hint" type="text" spellcheck="false"
+                           placeholder="比如：语气轻松些、总有一条冒险的选择" />
+                  </label>
+                </div>
+              </div>
             </div>
 
             <!-- 角色自带的世界书：导入带 character_book 的角色卡时会自动绑上，

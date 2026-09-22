@@ -149,6 +149,11 @@ export const el = {
     attrList: $('c-attr-list'),
     btnAttrPaste: $('btn-attr-paste'),
     attrPaste: $('c-attr-paste'),
+    // 剧情选项：开关 + 数量 + 额外要求
+    optionsOn: $('c-options-on'),
+    optionsConfig: $('c-options-config'),
+    optionsCount: $('c-options-count'),
+    optionsHint: $('c-options-hint'),
     // 角色自带的世界书：清单 + 绑定按钮 + 开关
     wbBox: $('c-worldbook-box'),
     wbList: $('c-wb-list'),
