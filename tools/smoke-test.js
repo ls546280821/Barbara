@@ -936,6 +936,168 @@ function probeImport(result) {
   }
   push('导入：没选文件时什么都不发生', emptyOk, emptyDetail);
 
+  // --- v3 变体：开场白在 chat_history 里，不在 first_mes ---
+  // 这一段是**真卡踩出来的**：某个站点导出的 v3 卡没有 first_mes，
+  // 开场白被放进了 chat_history[0].messages。以前只读 first_mes，
+  // 结果导入后开场白是**空的**（连带第一条消息里那段状态栏一起丢）。
+  // 标准 v3 规范里并没有 chat_history，所以两种形态都得认。
+  const v3Card = (extra) =>
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      spec_version: '3.0',
+      data: Object.assign(
+        {
+          name: 'v3 变体角色',
+          description: '描述',
+          extensions: {},
+          character_book: { entries: [], extensions: {} },
+          chat_history: [
+            {
+              id: 's1',
+              name: '开场对话',
+              messages: [
+                { role: 'assistant', content: '这是 v3 开场白。\n\n---\n好感度：0/100' }
+              ]
+            },
+            {
+              id: 's2',
+              name: '示例对话',
+              messages: [{ role: 'assistant', content: '这段是示例对话，不该被当成开场白。' }]
+            }
+          ]
+        },
+        extra || {}
+      )
+    });
+
+  const v3Only = run({ 'D:\\tmp\\v3.json': Buffer.from(v3Card(), 'utf8') }, ['D:\\tmp\\v3.json']);
+  const v3char = (v3Only.characters || [])[0];
+  push(
+    '导入：v3 变体的开场白从 chat_history 里读出来了（以前是空的）',
+    !!v3char && String(v3char.firstMes || '').includes('这是 v3 开场白'),
+    v3char ? JSON.stringify(String(v3char.firstMes || '').slice(0, 60)) : JSON.stringify(v3Only.errors)
+  );
+  push(
+    '导入：v3 开场白里的状态栏一起带过来了',
+    !!v3char && String(v3char.firstMes || '').includes('好感度：0/100'),
+    v3char ? JSON.stringify(String(v3char.firstMes || '').slice(-40)) : '没有角色'
+  );
+  push(
+    '导入：只取第一个 session，第二个（示例对话）不混进来',
+    !!v3char && !String(v3char.firstMes || '').includes('这段是示例对话'),    v3char ? JSON.stringify(String(v3char.firstMes || '')) : '没有角色'
+  );
+
+  // first_mes 才是权威的：两个都有时必须用它
+  const v3Both = run(
+    { 'D:\\tmp\\v3b.json': Buffer.from(v3Card({ first_mes: '标准 first_mes 优先' }), 'utf8') },
+    ['D:\\tmp\\v3b.json']
+  );
+  push(
+    '导入：first_mes 和 chat_history 都在时，用 first_mes',
+    !!v3Both.characters[0] && String(v3Both.characters[0].firstMes).includes('标准 first_mes 优先'),
+    JSON.stringify(String((v3Both.characters[0] || {}).firstMes || '').slice(0, 40))
+  );
+
+  // 第一条是媒体条目（多模态卡）时要跳过，别把图片当文本
+  const v3Media = run(
+    {
+      'D:\\tmp\\v3c.json': Buffer.from(
+        JSON.stringify({
+          spec: 'chara_card_v3',
+          data: {
+            name: '多模态卡',
+            description: 'd',
+            chat_history: [
+              {
+                id: 's1',
+                messages: [
+                  { type: 'image', content: 'https://example.com/a.png' },
+                  { role: 'user', content: '用户先说了一句' },
+                  { role: 'assistant', content: '真正的开场白在第二条 assistant。' }
+                ]
+              }
+            ]
+          }
+        }),
+        'utf8'
+      )
+    },
+    ['D:\\tmp\\v3c.json']
+  );
+  push(
+    '导入：chat_history 里的媒体条目被跳过，取第一条 assistant 文本',
+    !!v3Media.characters[0] && String(v3Media.characters[0].firstMes).includes('真正的开场白在第二条'),
+    JSON.stringify(String((v3Media.characters[0] || {}).firstMes || ''))
+  );
+
+  // 只有 user 消息时不能瞎编开场白
+  const v3NoAssistant = run(
+    {
+      'D:\\tmp\\v3d.json': Buffer.from(
+        JSON.stringify({
+          spec: 'chara_card_v3',
+          data: {
+            name: '没有开场白的卡',
+            description: 'd',
+            chat_history: [{ id: 's1', messages: [{ role: 'user', content: '只有用户消息' }] }]
+          }
+        }),
+        'utf8'
+      )
+    },
+    ['D:\\tmp\\v3d.json']
+  );
+  push(
+    '导入：chat_history 里没有 assistant 消息时，开场白留空而不是瞎编',
+    !!v3NoAssistant.characters[0] && v3NoAssistant.characters[0].firstMes === '',
+    JSON.stringify(String((v3NoAssistant.characters[0] || {}).firstMes || ''))
+  );
+
+  // chat_history 是脏数据（不是数组 / 里面是空对象）时不能崩
+  let v3DirtyOk = true;
+  let v3DirtyDetail = '';
+  try {
+    const dirtyCard = (chat) =>
+      JSON.stringify({ spec: 'chara_card_v3', data: { name: '脏卡', description: 'd', chat_history: chat } });
+    const cases = [
+      run({ 'D:\\tmp\\d1.json': Buffer.from(dirtyCard('不是数组'), 'utf8') }, ['D:\\tmp\\d1.json']),
+      run({ 'D:\\tmp\\d2.json': Buffer.from(dirtyCard([]), 'utf8') }, ['D:\\tmp\\d2.json']),
+      run({ 'D:\\tmp\\d3.json': Buffer.from(dirtyCard([null, {}, { messages: '不是数组' }]), 'utf8') }, [
+        'D:\\tmp\\d3.json'
+      ])
+    ];
+    v3DirtyOk = cases.every((o) => o.characters.length === 1 && o.characters[0].firstMes === '');
+    v3DirtyDetail = JSON.stringify(cases.map((o) => (o.characters[0] || {}).firstMes));
+  } catch (err) {
+    v3DirtyOk = false;
+    v3DirtyDetail = '崩了：' + ((err && err.message) || err);
+  }
+  push('导入：chat_history 是脏数据时不崩，开场白留空', v3DirtyOk, v3DirtyDetail);
+
+  // --- 真卡回归样本：某站点导出的 v3 变体（没有 first_mes） ---
+  // 上面那些是自造卡，这条用的是**真实导出文件的原始字节**，
+  // 形状一模一样（含 chat_history 两个 session、extensions.status_template）。
+  // 夹具就放在 tools/fixtures/ 下，改坏了会直接红。
+  let realOk = false;
+  let realDetail = '';
+  try {
+    const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'v3-card-chat-history.json'));
+    const real = run({ 'D:\\tmp\\real.json': fixture }, ['D:\\tmp\\real.json']);
+    const rc = (real.characters || [])[0];
+    realOk =
+      !!rc &&
+      rc.name === '纯爱芭芭拉' &&
+      String(rc.firstMes || '').includes('图书馆的义工芭芭拉') &&
+      String(rc.firstMes || '').includes('好感度：0/100') &&
+      String(rc.description || '').includes('数值系统');
+    realDetail = rc
+      ? `name=${rc.name} firstMes=${(rc.firstMes || '').length}字 含状态栏=${String(rc.firstMes || '').includes('好感度：0/100')}`
+      : JSON.stringify(real.errors);
+  } catch (err) {
+    realDetail = '读夹具失败：' + ((err && err.message) || err);
+  }
+  push('导入：真 v3 变体卡（仓库里的回归样本）开场白能读出来', realOk, realDetail);
+
   // 读文件失败得是「一条错误」，而不是整批炸掉
   let failOk = false;
   let failDetail = '';

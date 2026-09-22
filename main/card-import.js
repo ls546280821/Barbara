@@ -34,6 +34,42 @@ function cardAvatarToDataUrl(value) {
 }
 
 /**
+ * 从 v3 卡的 `chat_history` 里取开场白。
+ *
+ * 背景：**标准 v3 规范里没有 `chat_history`**（v3 只新增 assets / nickname /
+ * group_only_greetings / 世界书装饰器这些），开场白仍叫 `first_mes`。
+ * 但实际有站点导出的是这种变体：卡里 `first_mes` 不存在，开场白被放进了
+ * `chat_history[0].messages` 里那条 assistant 消息。遇到了就得读。
+ *
+ * 结构（按导出的实际形态）：
+ *   chat_history: [
+ *     { id, name: '开场对话', messages: [{ role: 'assistant', content: '…' }, …] },
+ *     { id, name: '示例对话', messages: [ … ] },   ← 备用 / 示例，这里不用
+ *   ]
+ *
+ * ⚠️ 只读**第一个** session 的第一条 assistant 消息，而且只读纯文本。
+ * 为什么不做更多（都是踩坑点）：
+ *   · 第二个 session 从名字看像「示例对话」，但那是作者的命名习惯，不是规范约定 ——
+ *     拿它去填 mesExample 就是靠猜，猜错会把示例对话塞进提示词。
+ *   · 多模态卡里 messages 混着 { type: 'image', … } 这类媒体条目，不能当文本用。
+ */
+function firstMesFromChatHistory(d) {
+  const sessions = d && Array.isArray(d.chat_history) ? d.chat_history : null;
+  if (!sessions || !sessions.length) return '';
+
+  const first = sessions[0];
+  const messages = first && Array.isArray(first.messages) ? first.messages : [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    if (msg.role !== 'assistant') continue;
+    if (typeof msg.content !== 'string') continue;
+    if (!msg.content.trim()) continue;
+    return msg.content;
+  }
+  return '';
+}
+
+/**
  * 把角色卡（v1 扁平 / v2、v3 包一层 data）转成内部格式。
  * 文件名在没写角色名时当兜底。
  * 另外把卡里内嵌的世界书（character_book）一并解析出来 ——
@@ -59,6 +95,11 @@ function characterFromCard(card, avatar, source, fallbackName, makeWorldbookId) 
       ? d.extensions.barbara
       : {};
 
+  // 开场白：先按标准字段取；这一批都没有才去翻 v3 变体的 chat_history。
+  // 顺序不能反 —— 标准字段存在时它才是权威的。
+  const firstMes =
+    d.first_mes || d.first_message || d.greeting || d.char_greeting || firstMesFromChatHistory(d);
+
   const character = normalizeCharacter(
     {
       name: d.name || d.char_name || fallbackName,
@@ -67,7 +108,7 @@ function characterFromCard(card, avatar, source, fallbackName, makeWorldbookId) 
       description: d.description || d.char_persona,
       personality: d.personality,
       scenario: d.scenario || d.world_scenario,
-      firstMes: d.first_mes || d.first_message || d.greeting || d.char_greeting,
+      firstMes,
       mesExample: d.mes_example || d.example_dialogue || d.char_example_dialogue,
       systemPrompt: d.system_prompt,
       postHistoryInstructions: d.post_history_instructions,
