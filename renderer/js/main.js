@@ -744,6 +744,17 @@ function messageNode(message, index, character, labels) {
       cont.addEventListener('click', continueLastMessage);
       actions.appendChild(cont);
     }
+
+    // 配图：只有配了生图才显示，免得点了才知道没配
+    if (String(message.content || '').trim() && (state.settings || {}).imageProviderId) {
+      const draw = document.createElement('button');
+      draw.className = 'mini-btn';
+      draw.textContent = '配图';
+      draw.title = '用生图模型给这段配一张插画';
+      draw.setAttribute('aria-label', '给这条回复配图');
+      draw.addEventListener('click', () => illustrateMessage(index));
+      actions.appendChild(draw);
+    }
   }
 
   // 删除这一条消息（会先弹确认框）
@@ -2793,6 +2804,81 @@ function buildMessageImages(message) {
   return wrap;
 }
 
+/**
+ * 给某条 AI 回复配一张插画。
+ *
+ * 用的是**生图那一组独立配置**（服务商 + 模型），和聊天模型无关 ——
+ * 换生图模型不会影响这段对话的风格。
+ *
+ * 提示词直接取这条回复的正文（剥掉状态栏那几行），截一段给模型。
+ */
+async function illustrateMessage(index) {
+  const convo = activeConvo();
+  if (!convo) return;
+  if (state.streaming) {
+    showToast('正在生成，等它写完再配图');
+    return;
+  }
+
+  const message = convo.messages[index];
+  if (!message || message.role !== 'assistant') return;
+
+  const settings = state.settings || {};
+  if (!settings.imageProviderId) {
+    showToast('还没有配置生图，请到「设置 → 生图」里选一个服务商', 'error');
+    openSettings();
+    return;
+  }
+
+  const panelFields = convoPanelFields(convo);
+  const raw = stripPanelLines(String(message.content || ''), panelFields);
+  // 去掉 markdown 标记和括号里的旁白符号，让提示词更像一句画面描述
+  const prompt = raw
+    .replace(/\*\*|==|~~|[*_`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 800);
+
+  if (!prompt) {
+    showToast('这条回复没有可用来配图的文字', 'error');
+    return;
+  }
+
+  const node = el.messages.querySelector(`.msg[data-index="${index}"]`);
+  if (node) node.classList.add('illustrating');
+
+  showToast('正在画…（可能要等十几秒）');
+
+  try {
+    const result = await api.generateImage({
+      providerId: settings.imageProviderId,
+      model: settings.imageModel,
+      size: settings.imageSize,
+      prompt
+    });
+
+    if (!result || result.ok !== true) {
+      throw new Error((result && result.error) || '生图失败');
+    }
+
+    // 生成的图（PNG 通常一两 MB）先压一档再存进会话，
+    // 不然几张图就能把 conversations.json 撑到几十 MB
+    const shrunk = await shrinkChatImage(result.dataUrl);
+    if (!Array.isArray(message.images)) message.images = [];
+    message.images.push(shrunk);
+    message.imageModel = result.model || settings.imageModel;
+
+    convo.updatedAt = now();
+    persistConversations(0);
+    renderAll({ forceScroll: false });
+    showToast('画好了', 'ok');
+  } catch (err) {
+    showToast((err && err.message) || '生图失败', 'error');
+  } finally {
+    if (node) node.classList.remove('illustrating');
+  }
+}
+
 // ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
@@ -3380,6 +3466,18 @@ function fillSettingsForm(settings) {
     Number.isFinite(Number(settings.worldbookRecursiveDepth)) ? Number(settings.worldbookRecursiveDepth) : 3
   );
   el.s.commonAttrs.value = (Array.isArray(settings.commonAttributes) ? settings.commonAttributes : []).join(', ');
+
+  // 生图：下拉里放一个「不启用」+ 所有服务商
+  clear(el.s.imageProvider);
+  el.s.imageProvider.appendChild(h('option', { value: '', text: '（不启用生图）' }));
+  for (const provider of providers()) {
+    el.s.imageProvider.appendChild(h('option', { value: provider.id, text: provider.name }));
+  }
+  el.s.imageProvider.value = providers().some((p) => p.id === settings.imageProviderId)
+    ? settings.imageProviderId
+    : '';
+  el.s.imageModel.value = settings.imageModel || '';
+  el.s.imageSize.value = settings.imageSize || '1024x1024';
 }
 
 // ------------------------------ 服务商编辑 ------------------------------
@@ -3532,6 +3630,9 @@ function readSettingsForm() {
       const depth = Number(el.s.wbDepth.value);
       return Number.isFinite(depth) ? Math.max(0, Math.min(5, Math.floor(depth))) : 3;
     })(),
+    imageProviderId: el.s.imageProvider.value || '',
+    imageModel: el.s.imageModel.value.trim(),
+    imageSize: el.s.imageSize.value.trim() || '1024x1024',
     // 和「服务商模型列表」一样是「分隔符拆开的字符串列表」，直接复用那个解析
     commonAttributes: parseModels(el.s.commonAttrs.value).slice(0, 40)
   };
@@ -3589,6 +3690,12 @@ async function saveSettings(silent) {
 
   renderHeader();
   renderModelSwitch();
+
+  // 消息里有些东西是**跟着设置走的**：日期分隔（showDate）、
+  // 以及「配图」按钮要不要出现（配了生图才有）。
+  // 不重绘的话会出现「配好了生图但消息上没有按钮」，非得切个会话才出来。
+  renderMessages({ forceScroll: false });
+
   return state.settings;
 }
 

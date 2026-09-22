@@ -649,7 +649,64 @@ await scenario('给 AI 看图', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 14：对话窗口外观（字号 / 加粗颜色 / 背景图）
+//  场景 14：给剧情配图（生图）
+//
+//  生图和聊天是**两套配置**，所以这里从「还没配」开始走完整条路：
+//  没配 → 没有「配图」按钮 → 去设置里配一组 → 按钮出现 → 点它 → 图上到那条消息上。
+// ---------------------------------------------------------------------------
+await scenario('给剧情配图（生图）', async () => {
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  await sleep(250);
+
+  const lastAssistant = () => $$('#messages .msg.assistant').pop();
+  const actionsOf = (node) => Array.from(node.querySelectorAll('.msg-actions .mini-btn')).map((b) => b.textContent.trim());
+
+  check('没配生图时不显示「配图」', !actionsOf(lastAssistant()).includes('配图'), JSON.stringify(actionsOf(lastAssistant())));
+
+  // --- 去设置里配一组 ---
+  click('#btn-settings');
+  await waitFor('设置弹窗打开', () => shown('#settings-modal'));
+  await sleep(150);
+
+  check('设置里有生图服务商下拉', !!byId('s-image-provider'));
+  const imgOptions = Array.from(byId('s-image-provider').options).map((o) => o.value);
+  check('下拉里是「不启用」+ 全部服务商', imgOptions.length === 3 && imgOptions.includes('p-img'), JSON.stringify(imgOptions));
+
+  setValue('#s-image-provider', 'p-img');
+  setValue('#s-image-model', 'img-model-x');
+  setValue('#s-image-size', '1024x1024');
+  click('#btn-save-settings');
+  await waitFor('设置关闭', () => !shown('#settings-modal'));
+  await sleep(400);
+
+  const saved = (await window.barbara.getSettings()).settings;
+  check(
+    '生图配置落盘了（和聊天模型是分开的两个字段）',
+    saved.imageProviderId === 'p-img' && saved.imageModel === 'img-model-x' && saved.activeModel === 'test-model',
+    JSON.stringify({ img: saved.imageProviderId + '/' + saved.imageModel, chat: saved.activeProviderId + '/' + saved.activeModel })
+  );
+
+  // --- 配好之后按钮才出现 ---
+  await sleep(300);
+  check('配好之后出现「配图」', actionsOf(lastAssistant()).includes('配图'), JSON.stringify(actionsOf(lastAssistant())));
+
+  const before = lastAssistant().querySelectorAll('.bubble-image').length;
+  click(buttonByText(lastAssistant(), '配图'));
+  await waitFor('图画好了', () => lastAssistant().querySelectorAll('.bubble-image').length > before, 15000);
+  check('图挂到了那条消息上', lastAssistant().querySelectorAll('.bubble-image').length === before + 1, String(lastAssistant().querySelectorAll('.bubble-image').length));
+
+  // --- 落盘 ---
+  await sleep(700);
+  const withImage = (await window.barbara.getConversations()).conversations
+    .flatMap((c) => c.messages || [])
+    .filter((m) => m.role === 'assistant' && Array.isArray(m.images) && m.images.length);
+  check('生成的图落盘了', withImage.length >= 1, String(withImage.length));
+  check('图是 data:image/ 开头（不是外链）', withImage.length ? String(withImage[0].images[0]).startsWith('data:image/') : false);
+});
+
+// ---------------------------------------------------------------------------
+//  场景 15：对话窗口外观（字号 / 加粗颜色 / 背景图）
 // ---------------------------------------------------------------------------
 await scenario('对话窗口外观', async () => {
   click('#btn-appearance');

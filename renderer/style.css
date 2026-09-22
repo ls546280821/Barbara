@@ -916,6 +916,16 @@ body {
   display: block;
 }
 
+/* 正在画图：整条消息轻微呼吸，给个「在干活」的反馈 */
+.msg.illustrating .bubble {
+  animation: illustrating-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes illustrating-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
 #input {
   flex: 1 1 auto;
   border: none;

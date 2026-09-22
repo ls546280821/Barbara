@@ -361,6 +361,47 @@
             </span>
           </label>
         </section>
+
+        <!-- 生图：和聊天是两套配置，默认留空 = 不启用 -->
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="9" cy="9" r="2" />
+                <path d="m21 15-4.5-4.5L3 21" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">生图</div>
+              <div class="panel-desc">给剧情配插画。留空就是不启用</div>
+            </div>
+          </div>
+
+          <label class="field">
+            <span class="field-label">生图服务商</span>
+            <select id="s-image-provider" aria-label="生图服务商"></select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">生图模型</span>
+            <input id="s-image-model" type="text" spellcheck="false" placeholder="例如 dall-e-3 / flux-schnell" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">图片尺寸</span>
+            <input id="s-image-size" type="text" spellcheck="false" placeholder="1024x1024" />
+          </label>
+
+          <span class="field-help">
+            <b>生图和聊天是两个模型</b>，通常在<b>不同的端点</b>上（聊天走
+            <code>/chat/completions</code>，生图走 <code>/images/generations</code>），
+            所以这里单独配一组。<br />
+            服务商可以和聊天用同一个（同地址同 Key，只是换个模型），也可以另外加一个。<br />
+            目前只支持<b>同步返回图片</b>的接口（OpenAI 那套）；通义万相那种「先提交任务再轮询」的还不支持。<br />
+            配好之后，鼠标悬停在 AI 的回复上会多一个<b>「配图」</b>。
+          </span>
+        </section>
       </div>
 
       <footer class="modal-foot">

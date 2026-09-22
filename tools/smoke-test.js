@@ -52,6 +52,14 @@ function makeStore() {
           baseUrl: 'http://127.0.0.1:9/v1',
           apiKey: 'test-key',
           models: ['test-model']
+        },
+        // 第二个服务商专门给生图用 —— 生图和聊天是两套配置，测试也要分开验
+        {
+          id: 'p-img',
+          name: '冒烟测试生图',
+          baseUrl: 'http://127.0.0.1:9/v1',
+          apiKey: 'test-key',
+          models: ['img-model-x']
         }
       ],
       activeProviderId: 'p-test',
@@ -145,6 +153,7 @@ const calls = []; // 记录渲染层请求过的写操作，方便排查
 let chatPayloads = []; // 每次发给模型的完整消息（按顺序留着，供宿主侧断言用）
 let lastExport = null; // 最后一次「导出」交给主进程的东西
 const exportedPayloads = []; // 按顺序留所有导出，宿主侧断言用
+const imageRequests = []; // 生图请求参数
 
 function remember(channel, payload) {
   calls.push(channel);
@@ -263,6 +272,14 @@ function registerStubs() {
   const TINY_PNG =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
   ipcMain.handle('images:pick', () => ({ canceled: false, dataUrl: TINY_PNG }));
+
+  // 生图：记下请求参数（要验它用的是「生图」那组配置，不是聊天模型），
+  // 返回一张真的 1×1 PNG，让渲染层真实的「解码 → 压缩 → 存进会话」链路跑一遍
+  ipcMain.handle('images:generate', (_event, payload) => {
+    remember('images:generate');
+    imageRequests.push(clone(payload));
+    return { ok: true, dataUrl: TINY_PNG, model: (payload && payload.model) || '' };
+  });
   ipcMain.handle('util:copy', () => true);
   ipcMain.handle('util:openPath', () => true);
 
@@ -690,6 +707,33 @@ function probeImageMessage(result) {
   });
 }
 
+/**
+ * 生图的验证。关键一条：**它用的是「生图」那一组配置，而不是聊天模型** ——
+ * 用错了的话界面照样出图，但你的对话模型会被当成画图模型去打 /images/generations，
+ * 只会得到一个莫名其妙的报错。
+ */
+function probeImageGen(result) {
+  const req = imageRequests[0];
+
+  result.results.push({
+    name: '生图：用的是「生图」那一组配置，不是聊天模型',
+    pass: !!req && req.providerId === 'p-img' && req.model === 'img-model-x',
+    detail: req ? `providerId=${req.providerId} model=${req.model}` : '没收到生图请求'
+  });
+
+  result.results.push({
+    name: '生图：提示词取自那条回复的正文',
+    pass: !!req && String(req.prompt).includes('冒烟测试回复'),
+    detail: req ? `"${String(req.prompt).slice(0, 36)}…"` : ''
+  });
+
+  result.results.push({
+    name: '生图：请求里带上了尺寸',
+    pass: !!req && req.size === '1024x1024',
+    detail: req ? String(req.size) : ''
+  });
+}
+
 app.whenReady().then(async () => {
   registerStubs();
 
@@ -742,6 +786,7 @@ app.whenReady().then(async () => {
       probeExports(result);
       probeRecursion(result);
       probeImageMessage(result);
+      probeImageGen(result);
       await probeHover(win, result);
     } catch (err) {
       crashed = '宿主侧验证失败：' + ((err && err.message) || err);

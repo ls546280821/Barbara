@@ -125,6 +125,10 @@ const DEFAULT_SETTINGS = {
   // 世界书递归扫描最多连锁几层。0 = 完全关掉递归。
   // 只有勾了「递归」的条目才会往下带，所以这个上限是第二道闸。
   worldbookRecursiveDepth: 3,
+  // --- 生图（和聊天是两套：不同端点，通常也是不同模型）---
+  imageProviderId: '',
+  imageModel: '',
+  imageSize: '1024x1024',
   // --- 对话窗口外观（只影响显示，不进提示词）---
   chatFontSize: 14,     // 消息正文字号（px）
   chatBoldColor: '',    // **加粗** 用什么颜色，空 = 跟随主题
@@ -359,6 +363,14 @@ function normalizeSettings(saved) {
 
   // 界面主题
   s.theme = raw.theme === 'dark' ? 'dark' : 'light';
+
+  // 生图：和聊天完全分开的一组配置，所以这里只做格式清洗，
+  // 不存在的服务商 id 就留着 —— 用户可能还没保存那个服务商
+  s.imageProviderId = typeof raw.imageProviderId === 'string' ? raw.imageProviderId.trim().slice(0, 60) : '';
+  s.imageModel = typeof raw.imageModel === 'string' ? raw.imageModel.trim().slice(0, 120) : '';
+  const imgSize = String(raw.imageSize || '').trim();
+  // 尺寸各家不一样，不写死白名单，只要求是「数字x数字」
+  s.imageSize = /^\d{2,4}x\d{2,4}$/i.test(imgSize) ? imgSize.toLowerCase() : DEFAULT_SETTINGS.imageSize;
 
   // 世界书递归深度：0 表示关掉递归（就算条目勾了也不连锁）
   const depth = Number(raw.worldbookRecursiveDepth);
@@ -911,6 +923,57 @@ function modelsUrl(baseUrl) {
 
 function chatUrl(baseUrl) {
   return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`;
+}
+
+function imagesUrl(baseUrl) {
+  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/images/generations`;
+}
+
+/**
+ * 下一个二进制文件（生图接口有时直接给链接）。
+ * 和 requestJson 一个路子，只是把响应体当 Buffer 收着，不当 JSON 解析。
+ */
+function downloadBinary(url, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (err) {
+      reject(new Error('图片链接格式不对。'));
+      return;
+    }
+
+    const transport = target.protocol === 'http:' ? http : https;
+    const req = transport.request(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'http:' ? 80 : 443),
+        path: `${target.pathname}${target.search}`,
+        method: 'GET'
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          downloadBinary(res.headers.location, timeoutMs).then(resolve, reject);
+          return;
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          if (res.statusCode >= 200 && res.statusCode < 300 && buffer.length) {
+            resolve(buffer);
+            return;
+          }
+          reject(new Error(`下载图片失败（HTTP ${res.statusCode}）。`));
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('下载图片超时。')));
+    req.on('error', (err) => reject(new Error(normalizeNetworkError(err))));
+    req.end();
+  });
 }
 
 /**
@@ -1645,6 +1708,70 @@ function registerIpc() {
     }
 
     return { canceled: false, filePath: result.filePath };
+  });
+
+  /**
+   * 生图。走 OpenAI 那套 /images/generations：
+   *   { model, prompt, n: 1, size, response_format: 'b64_json' } → { data: [{ b64_json }] }
+   *
+   * 它和聊天**既不是同一个端点、通常也不是同一个模型**，所以设置里单独指一组。
+   * 各家差异很大（通义万相那类是异步任务），这里只支持「同步返回图片」的这一套。
+   */
+  ipcMain.handle('images:generate', async (_event, payload) => {
+    const request = payload || {};
+    const settings = loadSettings();
+
+    const endpoint = endpointFor(settings, request.providerId, request.model);
+    if (!endpoint) {
+      return { ok: false, error: '还没有配置生图服务商，请到「设置 → 生图」里选一个。' };
+    }
+    if (!endpoint.apiKey) {
+      return { ok: false, error: `还没有填写「${endpoint.providerName}」的 API Key。` };
+    }
+
+    const prompt = String(request.prompt || '').trim().slice(0, 2000);
+    if (!prompt) return { ok: false, error: '没有可用的提示词。' };
+
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (endpoint.apiKey) headers.Authorization = `Bearer ${endpoint.apiKey}`;
+
+    try {
+      const json = await requestJson({
+        url: imagesUrl(endpoint.baseUrl),
+        method: 'POST',
+        headers,
+        body: {
+          model: endpoint.model,
+          prompt,
+          n: 1,
+          size: String(request.size || settings.imageSize || '1024x1024'),
+          response_format: 'b64_json'
+        },
+        // 生图比聊天慢得多，给两分钟
+        timeoutMs: 120000
+      });
+
+      const item = Array.isArray(json && json.data) ? json.data[0] : null;
+      if (!item) return { ok: false, error: '接口没有返回图片（data 是空的）。' };
+
+      if (item.b64_json) {
+        return { ok: true, dataUrl: `data:image/png;base64,${item.b64_json}`, model: endpoint.model };
+      }
+      if (item.url) {
+        // 有的服务商会无视 response_format 直接给链接。
+        // 渲染层 CSP 是 img-src 'self' data:，外链加载不了 —— 所以在主进程下载回来。
+        const buffer = await downloadBinary(String(item.url));
+        const mime = /\.jpe?g($|\?)/i.test(String(item.url)) ? 'image/jpeg' : 'image/png';
+        return {
+          ok: true,
+          dataUrl: `data:${mime};base64,${buffer.toString('base64')}`,
+          model: endpoint.model
+        };
+      }
+      return { ok: false, error: '接口返回里既没有 b64_json 也没有 url。' };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || '生图失败' };
+    }
   });
 
   /**

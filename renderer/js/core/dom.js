@@ -157,6 +157,9 @@ export const el = {
     showDate: $('s-showdate'),
     showUsage: $('s-showusage'),
     wbDepth: $('s-wb-depth'),
+    imageProvider: $('s-image-provider'),
+    imageModel: $('s-image-model'),
+    imageSize: $('s-image-size'),
     commonAttrs: $('s-commonattrs')
   },
   p: {
