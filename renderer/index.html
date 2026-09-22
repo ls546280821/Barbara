@@ -1112,6 +1112,11 @@
     </div>
   </div>
 
+  <!-- 面板字段的类型/范围/变化规则。主进程 require 的是同一个文件，
+       所以「范围怎么夹」两边跑的是同一份代码。
+       必须是普通 script（不能是 type="module"）：那是个 CommonJS 文件，
+       当 ES module 加载会报「没有具名导出」。它自己会把接口挂到 window.PanelFields。 -->
+  <script src="../main/panel-fields.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

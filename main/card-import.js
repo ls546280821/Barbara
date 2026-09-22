@@ -34,6 +34,59 @@ function cardAvatarToDataUrl(value) {
 }
 
 /**
+ * 把「互动模板」那种字段定义转成角色属性。
+ *
+ * 形状对照（左边是某站点导出的卡，右边是我们内部认的）：
+ *   { key:'favor', label:'好感度', type:'meter', min:0, max:100,
+ *     initial:20, hint:'…' }
+ *     → { name:'好感度', type:'meter', min:0, max:100, value:'20', hint:'…' }
+ *
+ * 几处取舍：
+ *   · 用 `label` 当字段名（那是给人看的、也是要注入给模型的），
+ *     `key` 只是它内部的变量名；
+ *   · 重名就加序号跳过 —— 面板字段是按名字认的，两个「自定义面板」
+ *     会互相覆盖，不如退成「自定义面板 2」；
+ *   · initial 是数组（列表型字段）时用「、」拼起来，因为面板值只能是字符串。
+ */
+function attributesFromStatusTemplate(tpl) {
+  const fields = tpl && Array.isArray(tpl.fields) ? tpl.fields : null;
+  if (!fields || !fields.length) return [];
+
+  const out = [];
+  const used = new Set();
+
+  for (const raw of fields) {
+    if (!raw || typeof raw !== 'object') continue;
+
+    let name = String(raw.label || raw.key || '').trim();
+    if (!name) continue;
+
+    if (used.has(name)) {
+      let n = 2;
+      while (used.has(`${name} ${n}`) && n < 50) n += 1;
+      name = `${name} ${n}`;
+    }
+    used.add(name);
+
+    const initial = raw.initial;
+    const value = Array.isArray(initial)
+      ? initial.filter((v) => typeof v === 'string' && v.trim()).join('、')
+      : initial == null
+        ? ''
+        : String(initial);
+
+    const field = { name, value, type: raw.type };
+    if (raw.min !== undefined) field.min = raw.min;
+    if (raw.max !== undefined) field.max = raw.max;
+    if (raw.hint) field.hint = raw.hint;
+
+    out.push(field);
+  }
+
+  return out;
+}
+
+/**
  * 从 v3 卡的 `chat_history` 里取开场白。
  *
  * 背景：**标准 v3 规范里没有 `chat_history`**（v3 只新增 assets / nickname /
@@ -100,6 +153,17 @@ function characterFromCard(card, avatar, source, fallbackName, makeWorldbookId) 
   const firstMes =
     d.first_mes || d.first_message || d.greeting || d.char_greeting || firstMesFromChatHistory(d);
 
+  // 属性（状态面板模板）有两个来源，优先级从高到低：
+  //   1. extensions.barbara.attributes —— 我们自己导出去的卡，是权威形状
+  //   2. extensions.status_template    —— 别的站点的「互动模板」，映射过来
+  // 自己导的卡两者不会同时有；别的站点导的卡只有后者。
+  const barbaraAttrs = Array.isArray(ext.attributes) ? ext.attributes : [];
+  const templateAttrs =
+    barbaraAttrs.length || !d.extensions || typeof d.extensions !== 'object'
+      ? []
+      : attributesFromStatusTemplate(d.extensions.status_template);
+  const attributes = barbaraAttrs.length ? barbaraAttrs : templateAttrs;
+
   const character = normalizeCharacter(
     {
       name: d.name || d.char_name || fallbackName,
@@ -114,12 +178,12 @@ function characterFromCard(card, avatar, source, fallbackName, makeWorldbookId) 
       postHistoryInstructions: d.post_history_instructions,
       creatorNotes: d.creator_notes || d.creatorcomment,
       tags: d.tags,
-      // 自己导出去的卡会把年龄/性别/种族/属性放在 extensions.barbara，
+      // 自己导出去的卡会把年龄/性别/种族放在 extensions.barbara，
       // 这里读回来，导出再导入才是一个闭环（别的软件按规范会原样忽略这段）
       age: ext.age,
       gender: ext.gender,
       race: ext.race,
-      attributes: ext.attributes,
+      attributes,
       // 自带世界书的开关也跟着一起回来。缺省 true，所以没这个字段的卡不受影响。
       worldbookEnabled: typeof ext.worldbookEnabled === 'boolean' ? ext.worldbookEnabled : true
     },

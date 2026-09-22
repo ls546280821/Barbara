@@ -353,17 +353,65 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   setValue(attrRows[0].querySelector('.attr-value'), '100');
   setValue(attrRows[1].querySelector('.attr-value'), '布衣');
 
+  // --- 加一个「带范围的数值」属性（吸收互动模板那套：类型 + 范围 + 变化规则）---
+  setValue('#c-attr-new', '好感度');
+  click('#btn-add-attr');
+  await waitFor('第三个属性行', () => $$('#c-attr-list .attr-row').length === 3);
+
+  let meterRow = $$('#c-attr-list .attr-row')[2];
+  check('新属性默认是文本类型', !!meterRow.querySelector('.attr-type') && meterRow.querySelector('.attr-type').value === 'text',
+    meterRow.querySelector('.attr-type') && meterRow.querySelector('.attr-type').value);
+  check('文本类型下不显示范围输入框', !meterRow.parentElement.querySelector('.attr-more .attr-num'));
+
+  setValue(meterRow.querySelector('.attr-value'), '20');
+  // 选「数值」→ 重画一次，并且自动展开「更多」，范围输入框这时候才出现
+  setValue(meterRow.querySelector('.attr-type'), 'meter');
+  await waitFor('范围输入框出现', () => !!$('#c-attr-list .attr-more input.attr-num'));
+
+  meterRow = $$('#c-attr-list .attr-row')[2];
+  const numInputs = meterRow.parentElement.querySelectorAll('.attr-more .attr-num');
+  check('数值类型下有两个范围输入框', numInputs.length === 2, `实际 ${numInputs.length} 个`);
+  setValue(numInputs[0], '0');
+  setValue(numInputs[1], '100');
+  setValue(meterRow.parentElement.querySelector('.attr-more .attr-hint'), '按剧情合理增减，单轮不超过 10');
+
+  // 「更多」能收起，收起来之后配置不丢（草稿还在）
+  const moreBtn = meterRow.querySelector('.attr-more-btn');
+  check('有范围时「更多」默认是展开的', String(moreBtn.textContent).includes('收起'), String(moreBtn.textContent));
+  click(moreBtn);
+  await waitFor('收起后配置区没了', () => !$('#c-attr-list .attr-more'));
+  meterRow = $$('#c-attr-list .attr-row')[2];
+  click(meterRow.querySelector('.attr-more-btn'));
+  await waitFor('再展开还在', () => !!$('#c-attr-list .attr-more input.attr-num'));
+  check(
+    '收起再展开，范围没丢',
+    $$('#c-attr-list .attr-more .attr-num')[0].value === '0' && $$('#c-attr-list .attr-more .attr-num')[1].value === '100',
+    JSON.stringify($$('#c-attr-list .attr-more .attr-num').map((i) => i.value))
+  );
+
   click('#btn-save-char');
   await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色');
   await sleep(150);
 
   const saved = await savedCharacters();
   const mine = saved.find((c) => c.name === '属性测试角色');
-  check('属性已落盘到角色卡', !!mine && Array.isArray(mine.attributes) && mine.attributes.length === 2, JSON.stringify(mine && mine.attributes));
+  check('属性已落盘到角色卡', !!mine && Array.isArray(mine.attributes) && mine.attributes.length === 3, JSON.stringify(mine && mine.attributes));
   check(
     '初始值也一起落盘了',
     !!mine && mine.attributes[0].name === '金币' && mine.attributes[0].value === '100' && mine.attributes[1].value === '布衣',
     JSON.stringify(mine && mine.attributes)
+  );
+  // 白名单陷阱：保存时的映射以前只搬 name/value，新字段会被静默丢掉
+  check(
+    '数值属性的类型/范围/规则都落盘了（没被白名单丢掉）',
+    !!mine && mine.attributes[2].type === 'meter' && mine.attributes[2].min === 0 && mine.attributes[2].max === 100 &&
+      mine.attributes[2].hint === '按剧情合理增减，单轮不超过 10',
+    JSON.stringify(mine && mine.attributes[2])
+  );
+  check(
+    '界面自己的临时状态没有写进角色卡（_moreOpen）',
+    !!mine && !('_moreOpen' in mine.attributes[2]),
+    JSON.stringify(mine && Object.keys(mine.attributes[2] || {}))
   );
   check(
     '身份三项也落盘了',
@@ -384,6 +432,7 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   const panelRows = $$('#panel-fields .panel-row');
   const panelNames = panelRows.map((r) => r.querySelector('.panel-name').textContent);
   check('面板里出现了角色属性', panelNames.includes('金币') && panelNames.includes('上衣'), JSON.stringify(panelNames));
+  check('带范围的数值属性也在面板里', panelNames.includes('好感度'), JSON.stringify(panelNames));
 
   const goldRow = panelRows.find((r) => r.querySelector('.panel-name').textContent === '金币');
   check(
@@ -411,6 +460,51 @@ await scenario('属性：从角色卡种到状态面板', async () => {
   setValue('#input', '冒烟测试：属性注入');
   click('#btn-send');
   await waitFor('收到回复', () => $('#messages').textContent.includes('冒烟测试回复'), 8000);
+
+  // --- 5) 超范围的数值要被夹回来 ---
+  // 在面板里手填一个越界值（模拟模型写了 150/100），失焦即落盘。
+  click('#btn-panel-collapse');
+  await waitFor('面板展开', () => $$('#panel-fields .panel-row').length > 0);
+
+  const favorInput = $$('#panel-fields .panel-row')
+    .map((r) => r.querySelector('.panel-value'))
+    .find((i) => i && i.dataset.field === '好感度');
+  check('面板里有「好感度」输入框', !!favorInput);
+
+  if (favorInput) {
+    setValue(favorInput, '150/100');
+    favorInput.dispatchEvent(new Event('blur', { bubbles: true }));
+    await sleep(250);
+
+    const convos = await window.barbara.getConversations();
+    const active = convos.conversations.find((c) => c.id === convos.activeId);
+    check(
+      '面板：越界值被夹回上限（150/100 → 100/100）',
+      !!active && active.panel && active.panel['好感度'] === '100/100',
+      JSON.stringify(active && active.panel)
+    );
+    check(
+      '面板：字段定义跟着会话一起存下来了（有范围才夹得住）',
+      !!active && !!active.panelDefs && !!active.panelDefs['好感度'] && active.panelDefs['好感度'].max === 100,
+      JSON.stringify(active && active.panelDefs)
+    );
+
+    // 范围内、以及非数字的值不该被动
+    setValue(favorInput, '60/100');
+    favorInput.dispatchEvent(new Event('blur', { bubbles: true }));
+    await sleep(250);
+    const convos2 = await window.barbara.getConversations();
+    const active2 = convos2.conversations.find((c) => c.id === convos2.activeId);
+    check(
+      '面板：范围内的值不动（60/100 保持原样）',
+      !!active2 && active2.panel['好感度'] === '60/100',
+      JSON.stringify(active2 && active2.panel['好感度'])
+    );
+
+    // 收拾现场：下一个场景假定面板是**收起**状态（它自己验「默认收起」）
+    click('#btn-panel-collapse');
+    await sleep(150);
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,8 @@ const { importFiles } = require('../main/import-files.js');
 const { parseImportFile } = require('../main/card-import.js');
 // 世界书落盘归一化：和 main.js 的 worldbooks:save 跑的是同一份
 const { createWorldbookNormalizer } = require('../main/worldbook-store.js');
+// 面板字段的类型/范围/变化规则：主进程和渲染层共用的那一份
+const { clampFieldValue, normalizePanelField, normalizePanelFields, describePanelField } = require('../main/panel-fields.js');
 // 语义检索的向量工具也用真实现（编解码 / 余弦 / topK 都是它）
 const {
   hashText,
@@ -596,6 +598,26 @@ function probeInjection(result) {
     detail: panelOk ? '' : `翻了 ${blobs.length} 次请求都没找到完整面板`
   });
 
+  // 带范围的数值字段：注入时要告诉模型范围，并明确「超了会被拉回」。
+  // 只说「好感度：20」的话，模型不知道 0~100 这回事，写 150 也没人管。
+  const rangeBlob = blobs.find((b) => b.includes('【好感度】：20'));
+  const rangeOk = !!rangeBlob && rangeBlob.includes('0~100') && rangeBlob.includes('按剧情合理增减，单轮不超过 10');
+  result.results.push({
+    name: '属性：数值字段的范围和变化规则被注入给模型',
+    pass: rangeOk,
+    detail: rangeOk
+      ? ''
+      : rangeBlob
+        ? `找到了面板行但缺范围/规则：${JSON.stringify(rangeBlob.slice(rangeBlob.indexOf('[当前状态]'), rangeBlob.indexOf('[当前状态]') + 300))}`
+        : `翻了 ${blobs.length} 次请求都没找到「【好感度】：20」`
+  });
+  const warnOk = !!rangeBlob && rangeBlob.includes('超出范围会被程序拉回');
+  result.results.push({
+    name: '属性：注入里说明了超范围会被拉回',
+    pass: warnOk,
+    detail: warnOk ? '' : '没找到那句提醒'
+  });
+
   const playerOk = blobs.some((b) => b.includes('【玩家角色：改过的名字】'));
   result.results.push({
     name: '进入世界：注入的是你选/改过的玩家角色',
@@ -656,14 +678,21 @@ function probeExports(result) {
       const withText = pngWithTextChunk(png, charExport.pngText.keyword, charExport.pngText.text);
       const card = parseCharacterCardPng(withText);
       const ext = (card && card.data && card.data.extensions && card.data.extensions.barbara) || {};
+      const attrs = Array.isArray(ext.attributes) ? ext.attributes : [];
+      const meter = attrs.find((a) => a && a.name === '好感度');
       cardOk =
         !!card &&
         card.spec === 'chara_card_v2' &&
         card.data.name === '属性测试角色' &&
         ext.age === '18' &&
         ext.gender === '女' &&
-        Array.isArray(ext.attributes) &&
-        ext.attributes.length === 2;
+        attrs.length === 3 &&
+        // 范围/规则也要能过一遍 PNG 往返（写进 extensions.barbara 再读回来）
+        !!meter &&
+        meter.type === 'meter' &&
+        meter.min === 0 &&
+        meter.max === 100 &&
+        meter.hint === '按剧情合理增减，单轮不超过 10';
       cardDetail = card ? `读回来的是「${card.data.name}」 ext=${JSON.stringify(ext)}` : 'PNG 里没读回卡数据';
     } catch (err) {
       cardDetail = '往返崩了：' + ((err && err.message) || err);
@@ -1098,6 +1127,42 @@ function probeImport(result) {
   }
   push('导入：真 v3 变体卡（仓库里的回归样本）开场白能读出来', realOk, realDetail);
 
+  // 同一张真卡还要验「互动模板 → 角色属性」的映射。
+  // 卡里 extensions.status_template 有 7 个字段（含一个带范围的 meter），
+  // 以前整个被忽略，导入后属性是空的。
+  let tplOk = false;
+  let tplDetail = '';
+  try {
+    const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'v3-card-chat-history.json'));
+    const real = run({ 'D:\\tmp\\real.json': fixture }, ['D:\\tmp\\real.json']);
+    const rc = (real.characters || [])[0];
+    const attrs = (rc && rc.attributes) || [];
+    const favor = attrs.find((a) => a.name === '好感度');
+    const stage = attrs.find((a) => a.name === '关系阶段');
+    const bag = attrs.find((a) => a.name === '背包');
+    tplOk =
+      attrs.length === 7 &&
+      !!favor &&
+      favor.type === 'meter' &&
+      favor.min === 0 &&
+      favor.max === 100 &&
+      favor.value === '20' &&
+      String(favor.hint || '').includes('单轮变化不超过 10') &&
+      // 派生规则那种纯文本 hint 也要留下来（模型要靠它算关系阶段）
+      !!stage &&
+      String(stage.hint || '').includes('按好感度自动') &&
+      // 列表型字段的初始值是个数组，要拍平成字符串
+      !!bag &&
+      bag.type === 'list' &&
+      bag.value === '衣服';
+    tplDetail =
+      `属性 ${attrs.length} 个：${JSON.stringify(attrs.map((a) => `${a.name}/${a.type}`))}` +
+      (favor ? ` 好感度=${JSON.stringify(favor)}` : ' 没有好感度');
+  } catch (err) {
+    tplDetail = '读夹具失败：' + ((err && err.message) || err);
+  }
+  push('导入：真卡的「互动模板」被映射成角色属性（类型/范围/规则/初始值）', tplOk, tplDetail);
+
   // 读文件失败得是「一条错误」，而不是整批炸掉
   let failOk = false;
   let failDetail = '';
@@ -1112,6 +1177,81 @@ function probeImport(result) {
     failDetail = '崩了：' + ((err && err.message) || err);
   }
   push('导入：某个文件读不到时，其余文件照样导入', failOk, failDetail);
+}
+
+/**
+ * 面板字段的「类型 / 范围 / 变化规则」。
+ *
+ * 三件事要验：
+ *   1. 归一化：类型认不出来要退回 text（而不是丢字段），范围写反要换正；
+ *   2. 夹取：模型写 150/100、-5/100 要被拉回范围内，但**保留原来的写法**；
+ *   3. 描述：范围和变化规则要能拼成给模型看的一句话。
+ * 这些都是纯函数，跑的是主进程和渲染层共用的那一份 main/panel-fields.js。
+ */
+function probePanelFields(result) {
+  const push = (name, pass, detail) => result.results.push({ name, pass: !!pass, detail: detail || '' });
+
+  // --- 归一化 ---
+  const norm = (raw) => normalizePanelField(raw);
+
+  const textField = norm({ name: ' 心情 ', value: '平静' });
+  push('面板字段：名字去空白、缺省类型是文本', !!textField && textField.name === '心情' && textField.type === 'text',
+    JSON.stringify(textField));
+  push('面板字段：文本字段不带范围键', !!textField && !('min' in textField) && !('max' in textField),
+    JSON.stringify(textField));
+
+  const meter = norm({ name: '好感度', type: 'meter', min: 0, max: 100, value: 20, hint: '每轮最多加 10' });
+  push('面板字段：数值字段的范围/hint 都留下了',
+    !!meter && meter.type === 'meter' && meter.min === 0 && meter.max === 100 && meter.hint === '每轮最多加 10',
+    JSON.stringify(meter));
+  push('面板字段：初始值被转成字符串（面板值只能是字符串）', !!meter && meter.value === '20', JSON.stringify(meter && meter.value));
+
+  const reversed = norm({ name: '血', type: 'meter', min: 100, max: 0 });
+  push('面板字段：范围写反了会被换正', !!reversed && reversed.min === 0 && reversed.max === 100, JSON.stringify(reversed));
+
+  const badType = norm({ name: '怪', type: '进度条', value: 'x' });
+  push('面板字段：类型认不出来退回文本，而不是丢掉字段', !!badType && badType.type === 'text', JSON.stringify(badType));
+
+  push('面板字段：没有名字的直接丢掉', norm({ value: 'x' }) === null);
+  push('面板字段：脏输入返回 null 而不是崩', norm(null) === null && norm('字符串') === null && norm([]) === null);
+
+  const noName = normalizePanelFields([{ name: 'A', value: '1' }, { value: '2' }, null, { name: 'A', value: '3' }]);
+  push('面板字段：整表归一化会丢掉无名项和重名项', noName.length === 1 && noName[0].value === '1',
+    JSON.stringify(noName));
+
+  // --- 夹取 ---
+  const range = { type: 'meter', min: 0, max: 100 };
+  const clamp = (v) => clampFieldValue(v, range);
+
+  push('面板夹取：150/100 → 100/100（保留斜杠写法）', clamp('150/100').value === '100/100', JSON.stringify(clamp('150/100')));
+  push('面板夹取：-5/100 → 0/100', clamp('-5/100').value === '0/100', JSON.stringify(clamp('-5/100')));
+  push('面板夹取：范围内的原样不动', clamp('50/100').value === '50/100' && clamp('50/100').clamped === false,
+    JSON.stringify(clamp('50/100')));
+  push('面板夹取：纯数字也认', clamp('150').value === '100', JSON.stringify(clamp('150')));
+  push('面板夹取：小数保留（不粗暴取整）', clamp('100.7/100').value === '100/100' && clamp('99.5/100').value === '99.5/100',
+    `${JSON.stringify(clamp('100.7/100'))} ${JSON.stringify(clamp('99.5/100'))}`);
+  push('面板夹取：不是数字就原样放行（不能把中文值抹掉）', clamp('很累').value === '很累' && clamp('很累').clamped === false,
+    JSON.stringify(clamp('很累')));
+  push('面板夹取：空值不报错', clamp('').value === '' && clamp(null).value === '');
+
+  const lower = { type: 'meter', min: 10, max: 100 };
+  push('面板夹取：只有下限时也夹', clampFieldValue('3', lower).value === '10', JSON.stringify(clampFieldValue('3', lower)));
+  push('面板夹取：没有范围的数值字段不夹', clampFieldValue('999', { type: 'meter' }).value === '999',
+    JSON.stringify(clampFieldValue('999', { type: 'meter' })));
+  push('面板夹取：文本字段不夹（就算值是数字）', clampFieldValue('999', { type: 'text', min: 0, max: 100 }).value === '999');
+  push('面板夹取：没有定义就原样返回', clampFieldValue('999', null).value === '999');
+
+  // 分母不动：它是这个字段的满值，改了会更怪
+  push('面板夹取：分母原样保留', clampFieldValue('150/999', range).value === '100/999',
+    JSON.stringify(clampFieldValue('150/999', range)));
+
+  // --- 描述（注入给模型的那句话）---
+  const desc = describePanelField(meter);
+  push('面板描述：范围和变化规则都在里面', desc.includes('0~100') && desc.includes('每轮最多加 10'), desc);
+  push('面板描述：列表字段说明怎么分隔', describePanelField({ type: 'list' }).includes('、'),
+    describePanelField({ type: 'list' }));
+  push('面板描述：纯文本字段没有多余说明', describePanelField({ type: 'text' }) === '',
+    describePanelField({ type: 'text' }));
 }
 
 /**
@@ -1551,6 +1691,7 @@ app.whenReady().then(async () => {
       probeExports(result);
       probeImport(result);
       probeWorldbookStore(result);
+      probePanelFields(result);
       probeRecursion(result);
       probeImageMessage(result);
       probeImageGen(result);

@@ -17,6 +17,9 @@
 // 否则合法导入的 PNG 会在保存时被悄悄丢掉头像。
 const MAX_AVATAR_CHARS = 18000000; // ≈ 13MB 的 PNG，留足余量
 
+// 属性归一化用共享的那一份（主进程 / 渲染层 / 冒烟测试同一份）
+const { normalizePanelFields } = require('./panel-fields.js');
+
 // 角色「属性」的条数上限，和渲染层状态面板的 MAX_PANEL_FIELDS 保持一致
 const MAX_ATTRIBUTES = 120;
 
@@ -59,21 +62,15 @@ function normalizeGender(value) {
   return '';
 }
 
-/** 角色「属性」：一串 { name, value }，名字去重，顺序保留 */
+/**
+ * 角色「属性」：一串 { name, type, value, min?, max?, hint? }，名字去重，顺序保留。
+ *
+ * 归一化本身交给 main/panel-fields.js —— 那个模块主进程、渲染层、冒烟测试
+ * 三方共用一份。属性以前是「只有名字和值」，现在还能带类型、范围、变化规则，
+ * 分开写两份归一化迟早会漂。
+ */
 function normalizeAttributes(value) {
-  if (!Array.isArray(value)) return [];
-
-  const seen = new Set();
-  const out = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') continue;
-    const name = typeof item.name === 'string' ? item.name.trim().slice(0, 24) : '';
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    out.push({ name, value: typeof item.value === 'string' ? item.value.slice(0, 500) : '' });
-    if (out.length >= MAX_ATTRIBUTES) break;
-  }
-  return out;
+  return normalizePanelFields(value).slice(0, MAX_ATTRIBUTES);
 }
 
 /** 把任意来源的角色数据整理成内部统一格式，顺便挡住非法值 */

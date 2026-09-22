@@ -1583,6 +1583,13 @@ body {
   margin-top: 8px;
 }
 
+/* 一个属性 = 一行（名字/值/类型/更多）+ 可展开的「范围与变化规则」 */
+.attr-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .attr-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
 
 .attr-name {
@@ -1602,6 +1609,76 @@ body {
   min-height: 26px;
   padding: 3px 8px;
   font-size: 12px;
+  border-radius: 6px;
+}
+
+/* 类型选择框：文本 / 数值 / 列表 */
+.attr-row select.attr-type {
+  flex: 0 0 auto;
+  width: 62px;
+  min-height: 26px;
+  padding: 2px 4px;
+  font-size: 11.5px;
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-muted, var(--text-faint));
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.attr-row .attr-more-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted, var(--text-faint));
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.attr-row .attr-more-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--accent);
+}
+
+/* 展开区：贴着上面那一行缩进，视觉上从属于它 */
+.attr-more {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 3px 91px;
+}
+
+.attr-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.attr-range-label,
+.attr-range-sep {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.attr-more input.attr-num {
+  flex: 0 0 auto;
+  width: 68px;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 11.5px;
+  border-radius: 6px;
+}
+
+.attr-more input.attr-hint {
+  width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 11.5px;
   border-radius: 6px;
 }
 

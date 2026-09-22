@@ -26,6 +26,21 @@ import { h, button, card, clear, renderListPage } from './ui/build.js';
 
 import { persistConversations } from './data/persist.js';
 import { reissueImportedIds } from './data/library-reissue.js';
+// 面板字段的类型/范围/变化规则。主进程 require('../../main/panel-fields.js')
+// 加载的是同一个文件，所以「范围怎么夹」两边跑的是同一份代码。
+//
+// 为什么是读全局而不是 import：那是个 CommonJS 文件（主进程要 require 它），
+// 当 ES module 加载会报「does not provide an export named …」。
+// 所以 index.html 里用普通 <script> 先加载它，它自己挂到 window.PanelFields。
+// 归一化也**不能**在渲染层另写一套 —— 那样「范围」会被静默丢掉
+// （角色属性已经吃过一次白名单丢字段的亏）。
+const panelFieldsApi = typeof window !== 'undefined' ? window.PanelFields : null;
+if (!panelFieldsApi) {
+  // 说明 index.html 里那个 <script src="../main/panel-fields.js"> 没加载成功。
+  // 早点炸出来，好过后面一大片「范围莫名其妙不生效」。
+  throw new Error('main/panel-fields.js 没加载 —— 检查 renderer/index.html 里的 script 标签');
+}
+const { clampFieldValue, normalizePanelField, normalizePanelFields, describePanelField } = panelFieldsApi;
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -950,9 +965,11 @@ function createConvo(activate) {
     // 两者由 effectiveWorldbookIds 决定用谁：会话绑了就只用会话的。
     worldbookIds: [],
     // 状态面板：fields 是出现过的字段顺序，panel 是当前值。
+    // panelDefs 是字段的类型/范围/变化规则（可选，老会话没有这个键也照常工作）。
     // 世界模型开局通常是空的，第一条带面板的回复会自动填上。
     panel: {},
     panelFields: [],
+    panelDefs: {},
     // 视角设置：叙述模式（标准/内心描写/上帝视角）、推进节奏、GM 模式
     narrationMode: DEFAULT_NARRATION_MODE,
     // 默认「一步一步」：不这样的话模型会一口气把整场戏演完，玩家只剩看的份
@@ -1177,6 +1194,67 @@ function convoPanel(convo) {
 }
 
 /**
+ * 字段定义表（名字 → {type, min, max, hint}）。
+ *
+ * 为什么存在**会话**上、而不是每轮去查角色卡：
+ *   · 面板值本来就存在会话上，定义跟着走才不会两边对不上；
+ *   · 这一局中途换了角色、或者把角色卡删了，正在进行的局仍然该受原来的约束；
+ *   · 老会话没有这张表 → 返回空，一切照旧（范围/hint 是可选增强）。
+ */
+function convoPanelDefs(convo) {
+  return convo && convo.panelDefs && typeof convo.panelDefs === 'object' ? convo.panelDefs : {};
+}
+
+/**
+ * 归一化整张定义表。读盘进来的数据不可信（用户手改过 JSON、版本更老），
+ * 所以只留真正能用的条目，其余丢掉 —— 丢一条定义只是少了范围提示，
+ * 留一条坏定义却可能让夹取逻辑算出个乱值。
+ */
+function normalizePanelDefs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+  const out = {};
+  let count = 0;
+  for (const name of Object.keys(value)) {
+    if (count >= MAX_PANEL_FIELDS) break;
+    const raw = value[name];
+    if (!raw || typeof raw !== 'object') continue;
+
+    const def = normalizePanelField({ ...raw, name, value: '' });
+    if (!def) continue;
+    // normalizePanelField 对没有意义的定义只回 type:'text' 且没有范围/hint，
+    // 这种和「没有定义」等价，不用存
+    const hasRange = typeof def.min === 'number' || typeof def.max === 'number';
+    if (def.type === 'text' && !def.hint && !hasRange) continue;
+
+    out[name] = {
+      type: def.type,
+      ...(typeof def.min === 'number' ? { min: def.min } : {}),
+      ...(typeof def.max === 'number' ? { max: def.max } : {}),
+      ...(def.hint ? { hint: def.hint } : {})
+    };
+    count += 1;
+  }
+  return out;
+}
+
+/** 某个字段的定义（可能是 undefined —— 表示没有范围/hint） */
+function convoPanelDef(convo, name) {
+  const def = convoPanelDefs(convo)[name];
+  return def && typeof def === 'object' ? def : null;
+}
+
+/**
+ * 把一个值按字段范围夹回去。返回夹过之后的字符串。
+ * 没有定义 / 不是数值字段 / 解析不出数字，都原样返回。
+ */
+function clampPanelValue(convo, name, value) {
+  const def = convoPanelDef(convo, name);
+  if (!def) return value;
+  return clampFieldValue(value, def).value;
+}
+
+/**
  * 把会话历史里出现过的面板字段同步到 convo.panel。
  * 取「最近一条提到该字段的助手消息」的值，所以手动改过的旧轮次会被更新的值覆盖。
  * 返回是否发生了变化 —— 调用方据此决定要不要重绘面板。
@@ -1216,11 +1294,13 @@ function syncConvoPanel(convo) {
     }
   }
 
-  // 值：历史里扫到的优先（最新一轮说了算），没扫到的沿用面板里现有的
+  // 值：历史里扫到的优先（最新一轮说了算），没扫到的沿用面板里现有的。
+  // 有范围的数值字段在这里夹一下 —— 模型写 150/100、-5/100 都会被拉回范围内，
+  // 否则面板上会长期挂着一个越界的数，而且下一轮它还会照抄那个越界值。
   const panel = {};
   for (const name of order) {
     const value = latest.has(name) ? latest.get(name) : existingPanel[name];
-    if (value !== undefined) panel[name] = value;
+    if (value !== undefined) panel[name] = clampPanelValue(convo, name, value);
   }
 
   convo.panelFields = order;
@@ -1235,9 +1315,30 @@ function setPanelField(convo, name, value) {
   const fields = [...convoPanelFields(convo)];
   if (!fields.includes(name)) fields.push(name);
   convo.panelFields = fields.slice(0, MAX_PANEL_FIELDS);
-  convo.panel = { ...convoPanel(convo), [name]: String(value || '').slice(0, 500) };
+  // 手填的值也夹一下 —— 用户手滑写 150、模型输出越界，走的是同一个入口，
+  // 只在 syncConvoPanel 里夹的话这两条路都漏。
+  const text = String(value == null ? '' : value).slice(0, 500);
+  convo.panel = { ...convoPanel(convo), [name]: clampPanelValue(convo, name, text) };
   convo.updatedAt = now();
   persistConversations(0);
+}
+
+/**
+ * 字段说明图例：有范围 / 变化规则的字段才出现。
+ *
+ * 单独列在图例里，而不是跟在值后面 —— 值本身要**原样回显**给模型看
+ * （它就是模型上一轮写的），掺上注解会影响它照着抄。
+ */
+function panelFieldLegend(convo, fields) {
+  const lines = [];
+  for (const name of fields) {
+    const def = convoPanelDef(convo, name);
+    if (!def) continue;
+    const desc = describePanelField(def);
+    if (!desc) continue;
+    lines.push(`- ${name}：${desc}`);
+  }
+  return lines;
 }
 
 /** 面板拼成注入块；没有面板就返回空串 */
@@ -1253,6 +1354,11 @@ function formatPanelForPrompt(convo) {
     lines.push(`【${name}】：${value}`);
   }
 
+  const legend = panelFieldLegend(convo, fields);
+  const legendBlock = legend.length
+    ? '\n\n字段的取值范围与变化规则（务必遵守，数值超出范围会被程序拉回）：\n' + legend.join('\n')
+    : '';
+
   // 一个值都还没有 = 刚用角色卡的属性模板开的局。
   // 这时候也要把字段名告诉模型，否则它不知道要维护哪些状态 ——
   // 而「模型得自己碰巧输出【金币】：100」正是属性模板要解决的冷启动问题。
@@ -1261,7 +1367,8 @@ function formatPanelForPrompt(convo) {
       '[当前状态]\n' +
       `本局需要维护这些状态字段：${fields.join('、')}\n` +
       '请在每次回复的末尾，用「【字段】：值」的格式把它们完整输出一遍' +
-      '（还不知道的写「未知」）；之后每轮照抄并更新，不要凭空改动已有数值。'
+      '（还不知道的写「未知」）；之后每轮照抄并更新，不要凭空改动已有数值。' +
+      legendBlock
     );
   }
 
@@ -1269,7 +1376,8 @@ function formatPanelForPrompt(convo) {
     '[当前状态]\n' +
     '这是本局当前的权威状态，请以它为准，不要自行改动历史数值。\n' +
     '每次回复末尾按同样的格式输出更新后的完整状态栏；没有变化的字段照抄。\n\n' +
-    lines.join('\n')
+    lines.join('\n') +
+    legendBlock
   );
 }
 
@@ -2037,12 +2145,13 @@ function closeMemoryModal() {
 // 存档点上限。每份都是一整段对话的副本，攒多了会把 conversations.json 撑大
 const MAX_CHECKPOINTS = 12;
 
-/** 深拷一份存档点内容（消息 / 面板 / 摘要 / 玩家角色） */
+/** 深拷一份存档点内容（消息 / 面板 / 面板字段定义 / 摘要 / 玩家角色） */
 function snapshotConvo(convo) {
   return {
     messages: JSON.parse(JSON.stringify(convo.messages || [])),
     panel: { ...(convoPanel(convo) || {}) },
     panelFields: [...convoPanelFields(convo)],
+    panelDefs: JSON.parse(JSON.stringify(convoPanelDefs(convo))),
     summaries: JSON.parse(JSON.stringify(convoSummaries(convo))),
     player: convo.player ? { ...convo.player } : null
   };
@@ -2094,6 +2203,7 @@ async function restoreCheckpoint(id) {
   convo.messages = data.messages || [];
   convo.panel = data.panel || {};
   convo.panelFields = data.panelFields || [];
+  convo.panelDefs = normalizePanelDefs(data.panelDefs);
   convo.summaries = data.summaries || [];
   if (data.player) convo.player = data.player;
   convo.updatedAt = now();
@@ -2192,6 +2302,8 @@ function branchFromMessage(index) {
     player: convo.player ? { ...convo.player } : null,
     panelFields: [...convoPanelFields(convo)],
     panel: { ...convoPanel(convo) },
+    // 字段的范围/hint 也要跟着分叉走，否则新线的数值从此不再受约束
+    panelDefs: JSON.parse(JSON.stringify(convoPanelDefs(convo))),
     messages: JSON.parse(JSON.stringify(convo.messages.slice(0, cut))),
     // 摘要不搬：它压缩的是「最早那批消息」，而新会话里这批消息是原样留着的，
     // 搬过去等于同一段内容被记两遍。新线从零开始攒记忆。
@@ -6521,18 +6633,31 @@ let charAttrs = [];
 // 性别是选择框，只认这几个值（导入的卡会在主进程先归一化过来）
 const GENDERS = ['男', '女', '其他'];
 
-/** 读角色卡上的属性（容错老数据 / 导入的角色卡） */
+/**
+ * 读角色卡上的属性（容错老数据 / 导入的角色卡）。
+ *
+ * 老数据只有 {name, value}，这里走一遍共享归一化，于是 type/min/max/hint
+ * 缺省都补成合理的值（type 默认 text）。范围/hint 是可选增强 ——
+ * 没有它们的属性行为和以前完全一样。
+ */
 function characterAttrs(character) {
   if (!character || !Array.isArray(character.attributes)) return [];
-  return character.attributes
-    .filter((a) => a && typeof a.name === 'string' && a.name.trim())
-    .map((a) => ({
-      name: a.name.trim().slice(0, 24),
-      value: String(a.value == null ? '' : a.value)
-    }));
+  return normalizePanelFields(character.attributes);
 }
 
-/** 重画编辑器的属性区：上面的快捷候选词 + 下面已加的属性行 */
+/** 编辑器里的字段类型选择框（文本 / 数值 / 列表） */
+const ATTR_TYPES = [
+  { value: 'text', label: '文本' },
+  { value: 'meter', label: '数值' },
+  { value: 'list', label: '列表' }
+];
+
+/**
+ * 重画编辑器的属性区：上面的快捷候选词 + 下面已加的属性行。
+ *
+ * 每行是「名字 + 初始值 + 类型 + 更多」。范围/变化规则收在「更多」里，
+ * 平时只露出名字和值 —— 大多数属性就是个文本，不该被一排输入框淹掉。
+ */
 function renderCharAttrs() {
   if (!el.c.attrList) return;
 
@@ -6548,37 +6673,120 @@ function renderCharAttrs() {
   }
   el.c.attrQuick.classList.toggle('hidden', !el.c.attrQuick.childElementCount);
 
-  // 已加的属性：名字 + 初始值输入框 + 移除。
-  // 输入框里改值只更新草稿，不重画 —— 一重画光标就跳走了。
+  // 已加的属性。输入框里改值只更新草稿，不重画 —— 一重画光标就跳走了。
   clear(el.c.attrList);
   charAttrs.forEach((attr, index) => {
-    const input = h('input', {
+    const valueInput = h('input', {
       type: 'text',
       class: 'attr-value',
       value: attr.value,
       spellcheck: 'false',
       placeholder: '初始值（可以留空）',
       'aria-label': `${attr.name} 的初始值`,
-      oninput: () => { attr.value = input.value; }
+      oninput: () => {
+        attr.value = valueInput.value;
+      }
     });
 
-    el.c.attrList.appendChild(
-      h(
-        'div',
-        { class: 'attr-row' },
-        h('span', { class: 'attr-name', text: attr.name, title: attr.name }),
-        input,
-        button({
-          class: 'panel-del',
-          text: '✕',
-          title: '删掉这个属性',
-          onClick: () => {
-            charAttrs.splice(index, 1);
-            renderCharAttrs();
-          }
-        })
-      )
+    const typeSelect = h(
+      'select',
+      {
+        class: 'attr-type',
+        'aria-label': `${attr.name} 的类型`,
+        title: '字段类型：数值可以设范围，超出范围时程序会拉回来',
+        onchange: () => {
+          const next = typeSelect.value;
+          // 切到「数值」时自动把「更多」展开 —— 否则用户选了类型还得再点一次
+          // 才能看到范围输入框，很容易以为这个功能不存在。
+          if (next === 'meter' && attr.type !== 'meter') attr._moreOpen = true;
+          attr.type = next;
+          renderCharAttrs();
+        }
+      },
+      ATTR_TYPES.map((t) => h('option', { value: t.value, text: t.label, selected: (attr.type || 'text') === t.value }))
     );
+
+    // 「更多」：默认展开条件是「已经有范围或规则」，但用户手动收起/展开过
+    // 就以手动状态为准（_moreOpen 是 true/false/undefined 三态）——
+    // 只看 hasMore 的话，一旦设过范围就再也收不起来了。
+    const hasMore = typeof attr.min === 'number' || typeof attr.max === 'number' || !!attr.hint;
+    const moreOpen = attr._moreOpen === undefined ? hasMore : attr._moreOpen === true;
+
+    const moreBtn = button({
+      class: 'attr-more-btn',
+      text: moreOpen ? '收起' : '更多',
+      title: '范围与变化规则',
+      onClick: () => {
+        attr._moreOpen = !moreOpen;
+        renderCharAttrs();
+      }
+    });
+
+    const row = h(
+      'div',
+      { class: 'attr-row' },
+      h('span', { class: 'attr-name', text: attr.name, title: attr.name }),
+      valueInput,
+      typeSelect,
+      moreBtn,
+      button({
+        class: 'panel-del',
+        text: '✕',
+        title: '删掉这个属性',
+        onClick: () => {
+          charAttrs.splice(index, 1);
+          renderCharAttrs();
+        }
+      })
+    );
+
+    const wrap = h('div', { class: 'attr-item' }, row);
+
+    if (moreOpen) {
+      // 范围输入框（只在「数值」类型下有意义）
+      const numInput = (key, placeholder, label) =>
+        h('input', {
+          type: 'number',
+          class: 'attr-num',
+          value: typeof attr[key] === 'number' ? String(attr[key]) : '',
+          placeholder,
+          spellcheck: 'false',
+          'aria-label': `${attr.name} 的${label}`,
+          oninput: (event) => {
+            const raw = String(event.target.value || '').trim();
+            if (raw === '' || !isFinite(Number(raw))) delete attr[key];
+            else attr[key] = Number(raw);
+          }
+        });
+
+      const minInput = numInput('min', '下限', '最小值');
+      const maxInput = numInput('max', '上限', '最大值');
+
+      const hintInput = h('input', {
+        type: 'text',
+        class: 'attr-hint',
+        value: attr.hint || '',
+        spellcheck: 'false',
+        placeholder: '变化规则（给模型看，比如「示好时每轮最多加 10」）',
+        'aria-label': `${attr.name} 的变化规则`,
+        oninput: () => {
+          const text = hintInput.value;
+          if (text.trim()) attr.hint = text;
+          else delete attr.hint;
+        }
+      });
+
+      const more = h('div', { class: 'attr-more' });
+      if ((attr.type || 'text') === 'meter') {
+        more.appendChild(
+          h('div', { class: 'attr-range' }, h('span', { class: 'attr-range-label', text: '数值范围' }), minInput, h('span', { class: 'attr-range-sep', text: '~' }), maxInput)
+        );
+      }
+      more.appendChild(hintInput);
+      wrap.appendChild(more);
+    }
+
+    el.c.attrList.appendChild(wrap);
   });
 }
 
@@ -6708,16 +6916,24 @@ function addCharAttr(rawName) {
  * 往状态面板里补字段。已存在的跳过（同名的保留面板里的当前值 ——
  * 半路给会话绑角色，不该把这一局已经跑出来的数值冲掉），
  * 初始值只在「这个字段是刚种进去的」时候落地。
+ *
+ * pairs 的元素可以是 [name, value]，也可以是完整定义对象
+ * {name, value, type, min, max, hint} —— 后者会把范围/hint 一起记到
+ * convo.panelDefs 上，之后注入提示词时告诉模型（见 formatPanelForPrompt）。
  */
 function appendPanelFields(convo, pairs) {
   if (!convo || !pairs.length) return false;
 
   const fields = [...convoPanelFields(convo)];
   const panel = { ...convoPanel(convo) };
+  const defs = { ...convoPanelDefs(convo) };
   const known = new Set(fields);
   let changed = false;
 
-  for (const [name, value] of pairs) {
+  for (const pair of pairs) {
+    // 两种形状都收：[name, value] 和完整定义对象
+    const raw = Array.isArray(pair) ? { name: pair[0], value: pair[1] } : pair || {};
+    const name = String(raw.name == null ? '' : raw.name).trim();
     if (!name || known.has(name)) continue;
     if (!panelFieldAllowed(name)) continue;
     if (fields.length >= MAX_PANEL_FIELDS) break;
@@ -6725,25 +6941,42 @@ function appendPanelFields(convo, pairs) {
     fields.push(name);
     known.add(name);
     changed = true;
-    const text = String(value == null ? '' : value).trim();
-    if (text) panel[name] = text.slice(0, 500);
+
+    // 归一化一遍：范围写反了会被换正，类型不认识会退回 text
+    const def = normalizePanelField({ ...raw, name });
+    if (!def) continue;
+
+    // 范围/hint 记到会话上（只有真的有内容才记，免得存一堆空壳）
+    if (def.type !== 'text' || def.hint) {
+      defs[name] = {
+        type: def.type,
+        ...(typeof def.min === 'number' ? { min: def.min } : {}),
+        ...(typeof def.max === 'number' ? { max: def.max } : {}),
+        ...(def.hint ? { hint: def.hint } : {})
+      };
+    }
+
+    // 初始值也过一遍范围（卡作者自己写越界了，也一样夹回来）
+    const text = String(def.value == null ? '' : def.value).trim();
+    if (text) panel[name] = clampFieldValue(text, def).value.slice(0, 500);
   }
 
   if (!changed) return false;
 
   convo.panelFields = fields;
   convo.panel = panel;
+  convo.panelDefs = defs;
   convo.updatedAt = now();
   return true;
 }
 
-/** 把角色卡上的「属性」种进会话的状态面板 */
+/** 把角色卡上的「属性」种进会话的状态面板（连类型/范围/hint 一起） */
 function seedPanelFromCharacters(convo, list) {
   if (!convo || !Array.isArray(list)) return false;
 
   const pairs = [];
   for (const character of list) {
-    for (const attr of characterAttrs(character)) pairs.push([attr.name, attr.value]);
+    for (const attr of characterAttrs(character)) pairs.push(attr);
   }
   return appendPanelFields(convo, pairs);
 }
@@ -6817,10 +7050,17 @@ function stashCharForm() {
   character.age = el.c.age.value.trim().slice(0, 40);
   character.gender = GENDERS.includes(el.c.gender.value) ? el.c.gender.value : '';
   character.race = el.c.race.value.trim().slice(0, 40);
-  // 属性是编辑期间的草稿（charAttrs），保存时才写回角色卡
+  // 属性是编辑期间的草稿（charAttrs），保存时才写回角色卡。
+  // ⚠️ 这里以前是个只搬 name/value 的白名单映射 —— 于是 type/min/max/hint
+  // 会被静默丢掉（和当初「attributes 整个丢过」是同一个坑）。
+  // 现在只摘掉界面自己的临时状态（_moreOpen），其余字段原样带走。
   character.attributes = charAttrs
-    .filter((a) => a.name.trim())
-    .map((a) => ({ name: a.name.trim().slice(0, 24), value: String(a.value || '').slice(0, 200) }))
+    .filter((a) => a && typeof a.name === 'string' && a.name.trim())
+    .map((a) => {
+      const out = { ...a, name: a.name.trim().slice(0, 24), value: String(a.value == null ? '' : a.value).slice(0, 500) };
+      delete out._moreOpen;
+      return out;
+    })
     .slice(0, MAX_PANEL_FIELDS);
   character.avatar = charDraftAvatar;
   // 角色自带世界书的开关（草稿）。没有绑书时不写这个字段，
@@ -7187,6 +7427,14 @@ async function init() {
   const stored = await api.getConversations();
   state.conversations = Array.isArray(stored.conversations) ? stored.conversations : [];
   state.activeId = stored.activeId || null;
+
+  // 读盘进来的字段定义不可信（手改过 JSON、老版本写的），过一遍归一化。
+  // 只在真有坏数据时才重写这个键，免得给所有老会话平白加上一个空对象。
+  for (const convo of state.conversations) {
+    if (!convo || typeof convo !== 'object') continue;
+    if (convo.panelDefs === undefined) continue;
+    convo.panelDefs = normalizePanelDefs(convo.panelDefs);
+  }
 
   if (!state.conversations.length) {
     createConvo(true);
