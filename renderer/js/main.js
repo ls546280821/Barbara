@@ -637,6 +637,34 @@ function messageNode(message, index, character, labels) {
     role.appendChild(tag);
   }
 
+  // 候选切换（重新生成过才会有多个版本）。
+  // 放在角色行而不是操作栏：操作栏是悬停才浮出的，那样就**看不出这条有几个版本**了。
+  const variants = Array.isArray(message.variants) ? message.variants : null;
+  if (!isUser && !isError && variants && variants.length > 1) {
+    const at = Number.isFinite(message.variantIndex) ? message.variantIndex : 0;
+    role.appendChild(
+      h(
+        'span',
+        { class: 'variant-nav' },
+        button({
+          class: 'variant-btn',
+          text: '‹',
+          title: '上一条候选',
+          ariaLabel: '上一条候选',
+          onClick: () => switchVariant(index, -1)
+        }),
+        h('span', { class: 'variant-count', text: `${at + 1}/${variants.length}` }),
+        button({
+          class: 'variant-btn',
+          text: '›',
+          title: '下一条候选',
+          ariaLabel: '下一条候选',
+          onClick: () => switchVariant(index, 1)
+        })
+      )
+    );
+  }
+
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
 
@@ -2608,7 +2636,6 @@ async function sendMessage(text) {
   await requestCompletion(convo);
 }
 
-/** 调一次模型，把回复流式写进界面 */
 /**
  * 就地编辑一条消息：把气泡内容换成 textarea，保存/取消。
  *
@@ -2644,6 +2671,11 @@ function editMessage(index) {
         return;
       }
       message.content = next;
+      // 这条要是正好是「某一条候选」，改动要落回它那个槽里，
+      // 否则切走再切回来就变回老样子了
+      if (Array.isArray(message.variants) && Number.isFinite(message.variantIndex)) {
+        message.variants[message.variantIndex] = next;
+      }
       convo.updatedAt = now();
       // 助手消息里可能写着状态栏，改完要重新扫一遍面板
       if (message.role === 'assistant') syncConvoPanel(convo);
@@ -2750,6 +2782,10 @@ async function continueLastMessage() {
     setStreaming(false);
     state.requestId = null;
     convo.updatedAt = now();
+    // 续写改了正文，同样要落回当前那个候选槽
+    if (Array.isArray(last.variants) && Number.isFinite(last.variantIndex)) {
+      last.variants[last.variantIndex] = last.content;
+    }
     syncConvoPanel(convo);
     renderAll({ forceScroll: true });
     persistConversations();
@@ -2757,7 +2793,14 @@ async function continueLastMessage() {
   }
 }
 
-async function requestCompletion(convo) {
+/**
+ * 调一次模型，把回复流式写进界面。
+ *
+ * options.variants：已有的候选列表。传了就是「重新生成」——
+ * 新生成的那条会作为一个**新候选**接在后面，老的留着可以左右翻，
+ * 而不是把老的直接扔掉。
+ */
+async function requestCompletion(convo, options) {
   const endpoint = ensureConvoEndpoint(convo);
   if (!endpoint) {
     showToast('还没有配置模型服务', 'error');
@@ -2781,6 +2824,15 @@ async function requestCompletion(convo) {
     model: endpoint.model,
     providerId: endpoint.provider.id
   };
+
+  // 重新生成：把老候选接在前面，新的那条占一个空位先显示「正在思考」。
+  // 先占位是为了让「2/3」这种计数在流式过程中就是对的。
+  const seeded = options && Array.isArray(options.variants) ? options.variants.filter((v) => String(v || '').trim()) : null;
+  if (seeded && seeded.length) {
+    assistant.variants = [...seeded, ''];
+    assistant.variantIndex = assistant.variants.length - 1;
+  }
+
   convo.messages.push(assistant);
 
   const index = convo.messages.length - 1;
@@ -2823,9 +2875,21 @@ async function requestCompletion(convo) {
     if (!assistant.content && !assistant.reasoning) {
       throw new Error('接口没有返回任何内容。可能是模型名不对，或该模型不支持流式输出。');
     }
+
+    // 定稿：把这一轮的结果写回它那个候选槽
+    if (Array.isArray(assistant.variants)) {
+      assistant.variants[assistant.variantIndex] = assistant.content;
+    }
   } catch (err) {
     const message = (err && err.message) || '未知错误';
     const stopped = /已停止生成/.test(message);
+
+    // 没生成出东西，那个占位的空候选要撤掉，不然会留下一条空白候选
+    if (Array.isArray(assistant.variants)) {
+      assistant.variants.pop();
+      if (!assistant.variants.length) delete assistant.variants;
+      else assistant.variantIndex = assistant.variants.length - 1;
+    }
 
     if (stopped) {
       if (!assistant.content) {
@@ -2858,9 +2922,22 @@ async function requestCompletion(convo) {
 }
 
 /** 删除某条助手消息之后的全部内容，重新问一次 */
+/**
+ * 重新生成：删掉这条之后的全部内容，再问一次。
+ *
+ * 和以前不同的是**老的那条不扔** —— 它作为一个候选留着，生成完可以用
+ * 「‹ 2/3 ›」翻回去。写了一大段舍不得删、只想再抽一次的时候很有用。
+ */
 function regenerateFrom(index) {
   const convo = activeConvo();
   if (!convo || state.streaming) return;
+
+  // 这一轮已有的候选。第一次重新生成时，当前正文就是第一个候选。
+  const target = convo.messages[index];
+  let existing = null;
+  if (target && target.role === 'assistant' && String(target.content || '').trim()) {
+    existing = Array.isArray(target.variants) ? target.variants.slice() : [String(target.content)];
+  }
 
   let cut = Math.min(index, convo.messages.length - 1);
   while (cut >= 0 && convo.messages[cut].role !== 'user') cut -= 1;
@@ -2873,7 +2950,34 @@ function regenerateFrom(index) {
   convo.messages = convo.messages.slice(0, cut + 1);
   state.usage = null;
   persistConversations(0);
-  requestCompletion(convo);
+  requestCompletion(convo, existing ? { variants: existing } : undefined);
+}
+
+/**
+ * 换一条候选（swipe）。
+ * content 是「当前显示的那条」，改它就等于换了一条 —— 历史、复制、导出
+ * 读的都是 content，所以其它地方一行都不用动。
+ */
+function switchVariant(index, delta) {
+  const convo = activeConvo();
+  if (!convo || state.streaming) return;
+
+  const message = convo.messages[index];
+  const list = message && Array.isArray(message.variants) ? message.variants : null;
+  if (!list || list.length < 2) return;
+
+  const current = Number.isFinite(message.variantIndex) ? message.variantIndex : 0;
+  const next = (current + delta + list.length) % list.length;
+  if (next === current) return;
+
+  message.variantIndex = next;
+  message.content = list[next];
+  convo.updatedAt = now();
+
+  // 不同候选里写的状态栏可能不一样，换完重新扫一遍
+  syncConvoPanel(convo);
+  renderAll({ forceScroll: false });
+  persistConversations(0);
 }
 
 async function stopGenerating() {

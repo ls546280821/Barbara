@@ -277,16 +277,18 @@ function registerStubs() {
 
   // --- 聊天：假装模型回了一句话，并且真的走一遍流式通道 ---
   ipcMain.handle('chat:stop', () => true);
+  // 每次回复带个序号 —— 不然「重新生成」出来的候选和原来那条一模一样，
+  // 测不出「到底是哪一条」
+  let replySeq = 0;
   ipcMain.handle('chat:send', async (event, payload) => {
     remember('chat:send');
     chatPayloads.push(clone((payload && payload.messages) || []));
     const requestId = (payload && payload.requestId) || 'req-smoke';
     const model = (payload && payload.model) || 'test-model';
 
-    // 分片拼起来必须等于下面返回的 content —— 真实流式接口就是这样。
-    // （之前分片只是返回值的前缀，那会让「继续」这种依赖分片的路径验不准。）
-    const CONTENT = '冒烟测试回复：我收到了。**这是加粗**，==这是高亮==。';
-    const pieces = ['冒烟测试', '回复：我收到了。', '**这是加粗**，', '==这是高亮==。'];
+    replySeq += 1;
+    const CONTENT = `冒烟测试回复 #${replySeq}：我收到了。**这是加粗**，==这是高亮==。`;
+    const pieces = [`冒烟测试回复 #${replySeq}`, '：我收到了。', '**这是加粗**，', '==这是高亮==。'];
 
     for (const piece of pieces) {
       if (!event.sender.isDestroyed()) event.sender.send('chat:chunk', { requestId, text: piece });

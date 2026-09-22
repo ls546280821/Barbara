@@ -534,7 +534,68 @@ await scenario('消息：编辑与继续', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 12：对话窗口外观（字号 / 加粗颜色 / 背景图）
+//  场景 12：重新生成候选（swipe）
+// ---------------------------------------------------------------------------
+await scenario('消息：重新生成候选', async () => {
+  const lastNode = () => $$('#messages .msg.assistant').pop();
+  const navOf = (node) => node.querySelector('.variant-nav');
+  const countOf = (node) => {
+    const nav = navOf(node);
+    return nav ? nav.querySelector('.variant-count').textContent.trim() : null;
+  };
+  const contentOf = (node) => node.querySelector('.msg-content').textContent;
+
+  // 还没重新生成过：不该有候选切换
+  check('只有一个版本时没有候选切换', !navOf(lastNode()), countOf(lastNode()) || '（没有）');
+
+  const before = contentOf(lastNode());
+
+  // --- 重新生成：应该「多出一条候选」，而不是把老的扔掉 ---
+  click(buttonByText(lastNode(), '重新生成'));
+  await waitFor('生成完', () => byId('btn-send').disabled === false, 10000);
+  await sleep(250);
+
+  check('重新生成后出现候选切换', !!navOf(lastNode()));
+  check('计数是 2/2（停在刚生成的那条）', countOf(lastNode()) === '2/2', countOf(lastNode()));
+
+  const after = contentOf(lastNode());
+  check('显示的是新生成的那条', after !== before && after.includes('冒烟测试回复'), after.slice(0, 24));
+
+  // --- 往左翻：应该回到老的那条 ---
+  click(navOf(lastNode()).querySelectorAll('button')[0]);
+  await sleep(250);
+  check('左翻后计数变 1/2', countOf(lastNode()) === '1/2', countOf(lastNode()));
+  check('左翻后正文回到老的那条', contentOf(lastNode()) === before, contentOf(lastNode()).slice(0, 24));
+  check('刚才那条没丢（正文不是空的）', contentOf(lastNode()).length > 0);
+
+  // --- 往右翻回来 ---
+  click(navOf(lastNode()).querySelectorAll('button')[1]);
+  await sleep(250);
+  check('右翻后计数变 2/2', countOf(lastNode()) === '2/2', countOf(lastNode()));
+  check('右翻后正文又变回新的那条', contentOf(lastNode()) === after);
+
+  // --- 翻回第一条收尾：后面的场景（导出）要看正文里有「改过的回复内容」---
+  click(navOf(lastNode()).querySelectorAll('button')[0]);
+  await sleep(250);
+  check('收尾时停在第一条', countOf(lastNode()) === '1/2', countOf(lastNode()));
+
+  // --- 落盘 ---
+  await sleep(450);
+  const convos = (await window.barbara.getConversations()).conversations;
+  const withVariants = convos
+    .flatMap((c) => c.messages || [])
+    .find((m) => Array.isArray(m.variants) && m.variants.length > 1);
+  check('候选数组落盘了', !!withVariants, JSON.stringify(withVariants && withVariants.variants.map((v) => String(v).slice(0, 12))));
+  check('落盘了两条候选', !!withVariants && withVariants.variants.length === 2, String(withVariants && withVariants.variants.length));
+  check(
+    'content 和当前选中的候选一致',
+    !!withVariants && withVariants.content === withVariants.variants[withVariants.variantIndex],
+    JSON.stringify({ idx: withVariants && withVariants.variantIndex })
+  );
+});
+
+// ---------------------------------------------------------------------------
+//  场景 13：对话窗口外观（字号 / 加粗颜色 / 背景图）
 // ---------------------------------------------------------------------------
 await scenario('对话窗口外观', async () => {
   click('#btn-appearance');

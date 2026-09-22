@@ -580,6 +580,44 @@ body {
   margin-top: 8px;
 }
 
+/* 候选切换：‹ 2/3 › —— 重新生成过才会有多个版本。
+   放在角色行里常驻显示，这样一眼能看出「这条留了几个版本」；
+   放操作栏的话要悬停才看得见，等于发现不了。 */
+.variant-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.variant-btn {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.variant-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.variant-count {
+  min-width: 28px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
 /* 心理描写：弱化的旁白块，和正文一眼区分开。
    用带透明度的颜色，浅色/夜间两套主题都不用各写一遍。 */
 .bubble .msg-inner {
