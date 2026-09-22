@@ -78,6 +78,24 @@ function setValue(target, value) {
   return node;
 }
 
+/**
+ * 给下拉补一个 option 再选中它。
+ *
+ * 直接用 setValue 选一个「下拉里还没有的值」是不行的 ——
+ * 浏览器会把 select.value 静默变成空串，测试就会以为选上了，实际没选。
+ * 这里显式补 option，确保真的选中。
+ */
+function addAndSelect(select, value) {
+  const node = typeof select === 'string' ? $(select) : select;
+  if (!node) throw new Error(`找不到下拉：${select}`);
+  if (!Array.from(node.options).some((o) => o.value === value)) {
+    node.appendChild(new Option(value, value));
+  }
+  node.value = value;
+  node.dispatchEvent(new Event('change', { bubbles: true }));
+  return node;
+}
+
 /** 按按钮上的文字找按钮（卡片上的「编辑」「聊天」「游玩」都是这么找的） */
 function buttonByText(root, text) {
   if (!root) return null;
@@ -691,6 +709,51 @@ await scenario('给剧情配图（生图）', async () => {
     `${byId('s-image-model').tagName} ${JSON.stringify(imgModelOptions)}`
   );
   setValue('#s-image-model', 'img-model-x');
+  setValue('#s-image-size', '1024x1024');
+  await sleep(200);
+
+  // 尺寸下拉：不认识的模型给通用尺寸，不能是空下拉
+  const genericSizes = Array.from(byId('s-image-size').options).map((o) => o.value);
+  check(
+    '尺寸是下拉，未知模型给通用尺寸',
+    byId('s-image-size').tagName === 'SELECT' && genericSizes.includes('1024x1024'),
+    `${byId('s-image-size').tagName} ${JSON.stringify(genericSizes)}`
+  );
+
+  // 已知模型要给出它专属的尺寸（智谱 glm-image 就那 7 个固定值）
+  addAndSelect('#s-image-model', 'glm-image');
+  await sleep(200);
+  const sizeSel = byId('s-image-size');
+  const glmOptions = Array.from(sizeSel.options);
+  const glmSizes = glmOptions.map((o) => o.value);
+  const recommended = ['1280x1280', '1568x1056', '1056x1568', '1472x1088', '1088x1472', '1728x960', '960x1728'];
+  check(
+    '选 glm-image 时尺寸下拉是它推荐的 7 个值（顺序一致）',
+    JSON.stringify(glmSizes.slice(0, 7)) === JSON.stringify(recommended),
+    `实际=${JSON.stringify(glmSizes)}`
+  );
+  // 之前存的 1024x1024 不在推荐列表，但按官方自定义规则合法（1024-2048、32 的倍数），
+  // 所以应被保留为「自定义」而不是被丢掉或纠正
+  check(
+    '已存的合法自定义尺寸被保留并标注（glm-image 的 1024x1024 按自定义规则合法）',
+    glmSizes.length === 8 &&
+      glmSizes[7] === '1024x1024' &&
+      /自定义/.test(glmOptions[7].textContent),
+    JSON.stringify(glmOptions.map((o) => o.textContent))
+  );
+  check('glm-image 的尺寸默认选中 1280x1280', sizeSel.value, '1280x1280');
+
+  // 换回通用模型，尺寸选项也要跟着换回去
+  setValue('#s-image-model', 'img-model-x');
+  await sleep(200);
+  const backSizes = Array.from(sizeSel.options).map((o) => o.value);
+  check(
+    '换回未知模型时尺寸选项回到通用列表',
+    backSizes.includes('1024x1024') && !backSizes.includes('1568x1056'),
+    JSON.stringify(backSizes)
+  );
+
+  // 继续后面的流程
   setValue('#s-image-size', '1024x1024');
   click('#btn-save-settings');
   await waitFor('设置关闭', () => !shown('#settings-modal'));
