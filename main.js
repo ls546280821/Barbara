@@ -933,20 +933,50 @@ function buildHeaders(settings) {
   return headers;
 }
 
+/**
+ * 把接口地址末尾多余的端点路径去掉。
+ *
+ * 用户很容易把完整端点当成「接口地址」填进来（比如直接粘官方文档里的
+ * `.../v4/images/generations`），那样再拼一次就变成
+ * `.../v4/images/generations/images/generations`，接口直接 404。
+ *
+ * 只认下面这几个我们自己也拼的端点路径 —— 不做「猜」的匹配，
+ * 免得把正常的路径吃掉（比如 `/v4`、`/api` 都原样保留）。
+ */
+const ENDPOINT_SUFFIXES = [
+  '/chat/completions',
+  '/images/generations',
+  '/embeddings',
+  '/models'
+];
+
+function normalizeBaseUrl(baseUrl) {
+  let url = String(baseUrl || DEFAULT_BASE_URL).trim().replace(/\/+$/, '');
+
+  // 可能连贴两次，循环剥干净
+  for (let guard = 0; guard < 4; guard += 1) {
+    const hit = ENDPOINT_SUFFIXES.find((s) => url.toLowerCase().endsWith(s));
+    if (!hit) break;
+    url = url.slice(0, -hit.length).replace(/\/+$/, '');
+  }
+
+  return url;
+}
+
 function modelsUrl(baseUrl) {
-  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/models`;
+  return `${normalizeBaseUrl(baseUrl)}/models`;
 }
 
 function chatUrl(baseUrl) {
-  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`;
+  return `${normalizeBaseUrl(baseUrl)}/chat/completions`;
 }
 
 function imagesUrl(baseUrl) {
-  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/images/generations`;
+  return `${normalizeBaseUrl(baseUrl)}/images/generations`;
 }
 
 function embeddingsUrl(baseUrl) {
-  return `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/embeddings`;
+  return `${normalizeBaseUrl(baseUrl)}/embeddings`;
 }
 
 // ---------------------------------------------------------------------------

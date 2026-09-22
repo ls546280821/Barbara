@@ -3841,37 +3841,94 @@ async function saveSettings(silent) {
  * 这种情况下不能让用户卡死在一个看不懂的错误码上，所以给一份内置目录兜底。
  *
  * 按接口地址里的域名匹配，而不是按服务商名字 —— 名字用户可以随便改。
+ *
+ * imageModels 是「生图」那一组能用的模型。文本模型不能拿来生图，
+ * 选错了接口会报 404 —— 这个坑很容易踩，所以单独列出来。
  */
 const MODEL_CATALOG = [
   {
     match: /bigmodel\.cn/i,
     name: '智谱 GLM',
     note: '智谱没有「模型列表」接口，请从下面挑一个填进去',
-    models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.3-flashx', 'glm-5.2']
+    models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.3-flashx', 'glm-5.2'],
+    imageModels: ['glm-image', 'cogview-4-250304', 'cogview-4', 'cogview-3-flash']
   },
   {
     match: /dashscope\.aliyuncs\.com/i,
     name: '通义千问',
     note: '通义的 OpenAI 兼容模式对部分 Key 不返回模型列表，可先手填',
-    models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen-long']
+    models: ['qwen-plus', 'qwen-max', 'qwen-turbo', 'qwen-long'],
+    imageModels: ['wanx2.1-t2i-turbo', 'wanx2.1-t2i-plus', 'wanx-v1']
   },
   {
     match: /moonshot\.cn/i,
     name: 'Kimi',
     note: 'Moonshot 支持模型列表；若拉取失败可从下面挑',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
+    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+    imageModels: []
   },
   {
     match: /deepseek\.com/i,
     name: 'DeepSeek',
     note: 'DeepSeek 支持模型列表；若拉取失败可从下面挑',
-    models: ['deepseek-chat', 'deepseek-reasoner']
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+    // DeepSeek 目前没有生图模型
+    imageModels: []
+  },
+  {
+    match: /openai\.com/i,
+    name: 'OpenAI',
+    note: 'OpenAI 支持模型列表；若拉取失败可从下面挑',
+    models: ['gpt-4o-mini', 'gpt-4o'],
+    imageModels: ['gpt-image-1', 'dall-e-3']
   }
 ];
 
 function catalogForBaseUrl(baseUrl) {
   const url = String(baseUrl || '');
   return MODEL_CATALOG.find((c) => c.match.test(url)) || null;
+}
+
+/**
+ * 生图模型优先选对的。
+ *
+ * 坑：provider.models 里通常全是文本模型，生图那一组下拉如果直接沿用，
+ * 就会把 glm-5.3 这种文本模型发给 /images/generations，接口报 404。
+ * 所以有已知生图模型时，主动切过去并说明原因。
+ */
+function preferImageModel(provider) {
+  if (!provider) return;
+
+  const catalog = catalogForBaseUrl(provider.baseUrl);
+  const imageModels = catalog && Array.isArray(catalog.imageModels) ? catalog.imageModels : [];
+
+  const available = Array.isArray(provider.models) ? provider.models.filter(Boolean) : [];
+  const current = String(el.s.imageModel.value || '').trim();
+
+  // 当前选的已经是这家已知的生图模型 —— 不用动
+  if (current && imageModels.includes(current)) return;
+  // 用户自己在模型列表里放了生图模型，且已经选中它 —— 尊重用户
+  if (current && current !== available[0] && /image|cogview|dall-e|wanx|flux|sd|stable/i.test(current)) return;
+
+  const target = imageModels.length ? imageModels[0] : available[0];
+  if (!target || target === current) return;
+
+  const option = Array.from(el.s.imageModel.options || []).find((o) => o.value === target);
+  if (option) {
+    el.s.imageModel.value = target;
+  } else {
+    el.s.imageModel.appendChild(h('option', { value: target, text: target }));
+    el.s.imageModel.value = target;
+  }
+
+  if (imageModels.length) {
+    showToast(
+      `这家服务商的生图模型是 ${imageModels.join(' / ')}，` +
+        `已从「${current || '文本模型'}」切到「${target}」——` +
+        '文本模型不能用来生图，选错会报 404',
+      'ok'
+    );
+  }
 }
 
 /** 拉取失败时，判断是不是「这个服务商压根没有模型列表接口」 */
@@ -4698,7 +4755,9 @@ function bindEvents() {
 
   // 换服务商 → 模型下拉跟着换（新服务商的列表里没有老模型，所以从第一个开始）
   el.s.imageProvider.addEventListener('change', () => {
+    const provider = providerById(el.s.imageProvider.value);
     fillModelSelect(el.s.imageModel, el.s.imageProvider.value, '', '（先在左边选一个服务商）', false);
+    preferImageModel(provider);
   });
   el.s.embeddingProvider.addEventListener('change', () => {
     fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, '', '（先在上面选一个服务商）', false);
