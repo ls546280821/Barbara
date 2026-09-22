@@ -95,7 +95,7 @@ npm run dev
 | 改什么 | 怎么生效 |
 | --- | --- |
 | `renderer/style.css` | 保存即刷新 |
-| `renderer/renderer.js` / `index.html` | 保存即刷新（但页面状态会重置） |
+| `renderer/js/` 里的文件 / `index.html` | 保存即刷新（但页面状态会重置） |
 | `main.js` / `preload.js` | **必须重启**，这两个只在启动时读一次 |
 
 `F12` 或 `Ctrl + Shift + I` 开关 DevTools，`Ctrl + R` 刷新窗口。
@@ -118,9 +118,11 @@ barbara/
 └── renderer/        前端（Chromium 页面）
     ├── index.html
     ├── style.css
-    └── renderer.js  · 界面渲染
-                     · 流式输出的逐帧绘制
-                     · 组装发给模型的消息（人设、宏、示例对话）
+    └── js/          界面逻辑（ES module，不需要打包器）
+        ├── main.js      入口 · 组装消息（人设、宏、示例对话）· 大部分功能还在这
+        ├── core/        常量 / 状态 / DOM 引用 / preload 桥 / 工具
+        ├── ui/          提示条 / 确认框 / 主题 / Markdown
+        └── data/        持久化等纯逻辑
 ```
 
 **为什么文件操作都在 `main.js`？** 因为页面被 CSP 锁死了：

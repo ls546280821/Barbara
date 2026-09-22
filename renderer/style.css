@@ -763,6 +763,14 @@ body {
   animation: modal-fade 0.16s ease-out;
 }
 
+/* 弹窗之间的层级。
+   同 z-index 的定位元素按 DOM 顺序叠：角色编辑弹窗在 DOM 里排在「世界书」弹窗
+   前面，而它正是从世界书里点「编辑 / ＋ 新建」打开的 —— 不单独抬高一层，
+   编辑表单就会被世界书弹窗盖住，点了跟没反应一样。
+   确认框永远在最上面：它会盖在角色编辑器上问「放弃新建？」。 */
+#chars-modal { z-index: 60; }
+#confirm-modal { z-index: 70; }
+
 @keyframes modal-fade {
   from { opacity: 0; }
 }
@@ -1136,6 +1144,7 @@ body {
 }
 
 .char-card {
+  position: relative; /* 给右上角那个悬停才出现的删除按钮定位 */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1148,6 +1157,28 @@ body {
 }
 
 .char-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow-sm); }
+
+/* 卡片右上角的删除：跟左侧会话列表的 × 一样，平时透明、鼠标移上来才浮出。
+   用 :focus-visible 让键盘 Tab 到它时也能看见。 */
+.char-card-del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  transition: opacity 0.12s ease;
+}
+
+.char-card:hover .char-card-del,
+.char-card-del:focus-visible { opacity: 1; }
+.char-card-del:hover { color: var(--danger); background: var(--danger-bg); }
 
 .char-card-avatar {
   width: 76px;
@@ -1176,8 +1207,15 @@ body {
   color: var(--text);
 }
 
-.char-card-sub { font-size: 11px; color: var(--text-faint); }
-
+/* 这一行是「来源 · 分类标签…」，标签可能很多，所以单行截断不让卡片变形 */
+.char-card-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-faint);
+}
 .char-card-actions { display: flex; gap: 8px; width: 100%; margin-top: 2px; }
 .char-card-actions .btn { flex: 1 1 0; }
 
@@ -1203,6 +1241,75 @@ body {
 /* 角色表单里输入框多，把 textarea 的最低高度收一点，免得一屏放不下几项 */
 .char-form textarea { min-height: 74px; }
 .char-advanced textarea { min-height: 64px; }
+
+/* ------------------------------ 角色「属性」编辑区 ------------------------------
+   属性 = 游玩时状态面板里的字段。这里只填初始值，进游戏后在面板里改的是当前值。
+   行样式刻意和游玩时的 .panel-row 长得像，让人一眼看出是同一个东西。 */
+
+.attr-add-row { display: flex; gap: 8px; }
+
+.attr-add-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 快捷候选词：来自「设置 → 状态属性」，点一下就加一个属性 */
+.attr-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.attr-quick-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted, var(--text-faint));
+  cursor: pointer;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 9px;
+  border-radius: 999px;
+  transition: all 0.15s;
+}
+
+.attr-quick-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--accent);
+}
+
+.attr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.attr-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+
+.attr-name {
+  flex: 0 0 auto;
+  width: 84px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.attr-row input.attr-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+/* .panel-del 平时是透明的，靠「悬停行」浮现 —— 但那只对 .panel-row 生效，
+   属性区这一行是 .attr-row，得自己补一条，否则删除按钮永远看不见 */
+.attr-row:hover .panel-del { opacity: 1; }
 
 .char-head-row {
   display: flex;

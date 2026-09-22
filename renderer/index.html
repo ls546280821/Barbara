@@ -316,6 +316,29 @@
             </span>
           </label>
         </section>
+
+        <section class="panel-section">
+          <div class="panel-head">
+            <span class="panel-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 7h16M4 12h10M4 17h7" />
+              </svg>
+            </span>
+            <div class="panel-heading">
+              <div class="panel-title">状态属性</div>
+              <div class="panel-desc">角色编辑器里「属性」的快捷候选词</div>
+            </div>
+          </div>
+
+          <label class="field field-stack">
+            <span class="field-label">常用属性</span>
+            <textarea id="s-commonattrs" rows="2" spellcheck="false" placeholder="金币, 生命, 体力, 时间, 地点"></textarea>
+            <span class="field-help">
+              逗号或换行分隔。在角色编辑器里点一下这些候选词，就会给角色加一个同名属性。<br />
+              只是省打字的候选清单，不限制你手写别的属性名。
+            </span>
+          </label>
+        </section>
       </div>
 
       <footer class="modal-foot">
@@ -364,7 +387,7 @@
                 </label>
                 <label class="field">
                   <span class="field-label">标签</span>
-                  <input id="c-tags" type="text" spellcheck="false" placeholder="逗号分隔，例如：原神, 治愈" aria-label="标签" />
+                  <input id="c-tags" type="text" spellcheck="false" placeholder="分类用，例如：原神, 治愈" aria-label="标签" />
                 </label>
               </div>
             </div>
@@ -398,6 +421,25 @@
                 每行以 <code>{{user}}:</code> 或 <code>{{char}}:</code> 开头，用 <code>&lt;START&gt;</code> 分隔不同组。
               </span>
             </label>
+
+            <!-- 属性：会变成游玩时「状态」面板里的字段。
+                 这里填的是初始值，进游戏后在面板里改的是那一局的当前值。 -->
+            <div class="field field-stack">
+              <span class="field-label">属性（状态面板）</span>
+
+              <div class="attr-add-row">
+                <input id="c-attr-new" type="text" spellcheck="false" placeholder="属性名，比如 金币" aria-label="新属性名" />
+                <button id="btn-add-attr" class="btn btn-ghost btn-sm" type="button">添加</button>
+              </div>
+
+              <div id="c-attr-quick" class="attr-quick"></div>
+              <div id="c-attr-list" class="attr-list"></div>
+
+              <span class="field-help">
+                这些属性会进游玩时的「状态」面板，每轮由程序注入给 AI，数值不会漂。<br />
+                这里填的是<b>初始值</b>；进游戏之后在面板里改的是<b>这一局的当前值</b>，不会动到角色卡。
+              </span>
+            </div>
 
             <details class="char-advanced">
               <summary>高级选项（可以不管）</summary>
@@ -757,6 +799,6 @@
     </div>
   </div>
 
-  <script src="renderer.js"></script>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

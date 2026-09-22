@@ -1,196 +1,30 @@
 'use strict';
 
 // ============================================================================
-//  renderer.js —— 界面逻辑（跑在窗口里）
+//  main.js —— 界面逻辑的入口（跑在窗口里）
 //  职责：画对话、把消息发给主进程、接收流式增量做「打字机」效果、存历史。
+//
+//  这里还在往 ES module 拆（见 重构方案.md），分层是：
+//    core/   底层：常量、状态、DOM 引用、preload 桥、工具函数
+//    ui/     通用界面件：提示条、确认框、主题、Markdown
+//    data/   纯逻辑：持久化等
+//    views/  一个功能一块（还没开始搬）
+//  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 // ============================================================================
 
-const api = window.barbara;
+import { CONFIG } from './core/config.js';
+import { api } from './core/api.js';
+import { state } from './core/state.js';
+import { el } from './core/dom.js';
+import { uid, now, activeConvo } from './core/util.js';
 
-const $ = (id) => document.getElementById(id);
+import { showToast } from './ui/toast.js';
+import { confirmDialog } from './ui/confirm.js';
+import { applyTheme, toggleTheme } from './ui/theme.js';
+import { esc, renderMarkdown } from './ui/markdown.js';
 
-const el = {
-  convoList: $('convo-list'),
-  convoTitle: $('convo-title'),
-  convoMeta: $('convo-meta'),
-  messages: $('messages'),
-  input: $('input'),
-  hintText: $('hint-text'),
-  usageText: $('usage-text'),
-  btnNew: $('btn-new'),
-  btnSend: $('btn-send'),
-  btnStop: $('btn-stop'),
-  btnClear: $('btn-clear'),
-  btnCopyAll: $('btn-copy-all'),
-  btnSettings: $('btn-settings'),
-  btnFolder: $('btn-folder'),
-  btnChars: $('btn-chars'),
-  btnWorldbooks: $('btn-worldbooks'),
-  btnTheme: $('btn-theme'),
-  modal: $('settings-modal'),
-  btnCloseSettings: $('btn-close-settings'),
-  btnSaveSettings: $('btn-save-settings'),
-  btnTest: $('btn-test'),
-  btnFetchModels: $('btn-fetch-models'),
-  btnAddProvider: $('btn-add-provider'),
-  btnDelProvider: $('btn-del-provider'),
-  providerTabs: $('provider-tabs'),
-  providerPresets: $('provider-presets'),
-  modelSwitch: $('model-switch'),
-  // 状态面板
-  panelBox: $('panel-box'),
-  panelFields: $('panel-fields'),
-  panelHint: $('panel-hint'),
-  btnPanelToggle: $('btn-panel-toggle'),
-  btnPanelClose: $('btn-panel-close'),
-  btnPanelReset: $('btn-panel-reset'),
-  // 视角设置
-  btnPerspective: $('btn-perspective'),
-  perspectiveModal: $('perspective-modal'),
-  btnClosePerspective: $('btn-close-perspective'),
-  btnClosePerspective2: $('btn-close-perspective-2'),
-  pNarration: $('p-narration'),
-  pGm: $('p-gm'),
-  // 记忆
-  btnMemory: $('btn-memory'),
-  memoryCount: $('memory-count'),
-  memoryModal: $('memory-modal'),
-  btnCloseMemory: $('btn-close-memory'),
-  btnCloseMemory2: $('btn-close-memory-2'),
-  memorySummaryLine: $('memory-summary-line'),
-  memoryPendingLine: $('memory-pending-line'),
-  memoryList: $('memory-list'),
-  btnSummarizeNow: $('btn-summarize-now'),
-  btnMemoryClear: $('btn-memory-clear'),
-  memoryFootHint: $('memory-foot-hint'),
-  confirmModal: $('confirm-modal'),
-  confirmTitle: $('confirm-title'),
-  confirmMessage: $('confirm-message'),
-  confirmOk: $('confirm-ok'),
-  confirmCancel: $('confirm-cancel'),
-  toast: $('toast'),
-  // 角色库
-  charsModal: $('chars-modal'),
-  charsTitle: $('chars-title'),
-  charsSub: $('chars-sub'),
-  // 主区域的三个视图：聊天 / 角色列表页 / 世界书列表页
-  viewChat: $('view-chat'),
-  viewChars: $('view-chars'),
-  viewWorldbooks: $('view-worldbooks'),
-  charsPageSub: $('chars-page-sub'),
-  charPageGrid: $('char-page-grid'),
-  charPageEmpty: $('char-page-empty'),
-  wbPageSub: $('wb-page-sub'),
-  wbPageGrid: $('wb-page-grid'),
-  wbPageEmpty: $('wb-page-empty'),
-  // 进入世界前先创建玩家自己的角色
-  playerModal: $('player-modal'),
-  playerTitle: $('player-title'),
-  playerSub: $('player-sub'),
-  playerName: $('player-name'),
-  playerProfile: $('player-profile'),
-  btnClosePlayer: $('btn-close-player'),
-  btnCancelPlayer: $('btn-cancel-player'),
-  btnStartPlay: $('btn-start-play'),
-  btnCloseChars: $('btn-close-chars'),
-  btnImportCard: $('btn-import-card'),
-  btnNewChar: $('btn-new-char'),
-  btnDelChar: $('btn-del-char'),
-  btnSaveChar: $('btn-save-char'),
-  charEmpty: $('char-empty'),
-  charForm: $('char-form'),
-  charAvatar: $('char-avatar'),
-  btnClearAvatar: $('btn-clear-avatar'),
-  charFootHint: $('char-foot-hint'),
-  c: {
-    name: $('c-name'),
-    tags: $('c-tags'),
-    desc: $('c-desc'),
-    personality: $('c-personality'),
-    scenario: $('c-scenario'),
-    first: $('c-first'),
-    example: $('c-example'),
-    system: $('c-system'),
-    post: $('c-post'),
-    notes: $('c-notes')
-  },
-  s: {
-    temp: $('s-temp'),
-    maxTokens: $('s-maxtokens'),
-    userName: $('s-username'),
-    maxTurns: $('s-maxturns'),
-    system: $('s-system'),
-    sendOnEnter: $('s-sendonenter'),
-    showDate: $('s-showdate'),
-    showUsage: $('s-showusage')
-  },
-  p: {
-    name: $('p-name'),
-    baseUrl: $('p-baseurl'),
-    apiKey: $('p-apikey'),
-    models: $('p-models')
-  },
-  // 世界书
-  wb: {
-    modal: $('worldbooks-modal'),
-    btnClose: $('btn-close-worldbooks'),
-    btnClose2: $('btn-close-worldbooks-2'),
-    btnImport: $('btn-import-lorebook'),
-    btnNew: $('btn-new-worldbook'),
-    entriesEmpty: $('wb-entries-empty'),
-    entriesWrap: $('wb-entries-wrap'),
-    name: $('wb-name'),
-    opening: $('wb-opening'),
-    entryCount: $('wb-entry-count'),
-    entryList: $('wb-entry-list'),
-    btnPreview: $('btn-preview-wb'),
-    btnNewEntry: $('btn-new-entry'),
-    btnDelBook: $('btn-del-worldbook'),
-    charList: $('wb-char-list'),
-    btnAddChars: $('btn-add-wb-chars'),
-    btnNewChar: $('btn-new-wb-char'),
-    formEmpty: $('wb-form-empty'),
-    form: $('wb-form'),
-    footHint: $('wb-foot-hint'),
-    e: {
-      title: $('wb-e-title'),
-      keys: $('wb-e-keys'),
-      content: $('wb-e-content'),
-      order: $('wb-e-order'),
-      prob: $('wb-e-prob'),
-      keys2: $('wb-e-keys2'),
-      logic: $('wb-e-logic'),
-      constant: $('wb-e-constant'),
-      enabled: $('wb-e-enabled')
-    },
-    btnDelEntry: $('btn-del-entry'),
-    btnSaveEntry: $('btn-save-entry')
-  },
-  // 从角色库多选加入世界书
-  wbPicker: {
-    modal: $('wb-char-picker'),
-    list: $('wb-char-picker-list'),
-    hint: $('wb-char-picker-hint'),
-    btnClose: $('btn-close-wb-char-picker'),
-    btnCancel: $('btn-cancel-wb-char-picker'),
-    btnConfirm: $('btn-confirm-wb-char-picker')
-  }
-};
+import { persistConversations } from './data/persist.js';
 
-const state = {
-  settings: null,
-  presets: [],
-  conversations: [],
-  characters: [],
-  worldbooks: [],
-  activeId: null,
-  streaming: false,
-  requestId: null,
-  usage: null
-};
-
-let saveTimer = null;
-let toastTimer = null;
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
 // 角色和世界书是同一次请求落盘的（saveCharacters 一次写两个文件），
@@ -202,36 +36,11 @@ let editingCharacterId = null; // 角色库里当前正在编辑的角色
 // 同一个编辑器两处复用 —— 从世界书里点「编辑」改的是书里那份副本，不动角色库。
 let charEditorScope = 'library';
 let charDraftAvatar = ''; // 正在编辑的角色头像（dataURL）
+// 「新建角色」做出来的草稿：它先只活在编辑器里，不进任何列表、也不写磁盘，
+// 点了「保存角色」才真正被创建。关掉编辑器就等于放弃这次新建。
+let charDraft = null; // { character, scope, bookId }
 let editingWorldbookId = null; // 世界书弹窗里当前选中的世界书
 let editingEntryId = null; // 当前正在编辑的条目
-
-// ---------------------------------------------------------------------------
-//  常量配置
-// ---------------------------------------------------------------------------
-
-const CONFIG = {
-  MAX_TURNS: 20,           // 最多带入 API 的对话轮数（settings.maxTurns 的兜底值）
-  SAVE_DEBOUNCE_MS: 350,   // 保存防抖延迟
-  MAX_INPUT_HEIGHT: 190,   // 输入框最大高度
-  SCROLL_BOTTOM_THRESHOLD: 40, // 滚动到底部的判定阈值
-  TOAST_DURATION_MS: 3200  // 提示消息显示时长
-};
-
-// ---------------------------------------------------------------------------
-//  工具
-// ---------------------------------------------------------------------------
-
-function uid() {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function now() {
-  return Date.now();
-}
-
-function activeConvo() {
-  return state.conversations.find((c) => c.id === state.activeId) || null;
-}
 
 // ---------------------------------------------------------------------------
 //  多模型：服务商（provider）+ 模型（model）
@@ -304,7 +113,14 @@ function editorCharacterList() {
 
 function editorCharacterById(id) {
   if (!id) return null;
+  // 新建的草稿还没进任何列表，但编辑表单照样得能读写它
+  if (charDraft && charDraft.character.id === id) return charDraft.character;
   return editorCharacterList().find((c) => c.id === id) || null;
+}
+
+/** 编辑器里现在放着的是一个还没保存的新角色吗？ */
+function isCharDraft() {
+  return !!charDraft && editingCharacterId === charDraft.character.id;
 }
 
 function characterById(id) {
@@ -471,112 +287,14 @@ function scrollToBottom(force) {
   el.messages.scrollTop = 1e9;
 }
 
-function showToast(message, kind) {
-  el.toast.textContent = message;
-  el.toast.className = `toast${kind ? ` ${kind}` : ''}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.toast.classList.add('hidden'), CONFIG.TOAST_DURATION_MS);
-}
-
-// ---------------------------------------------------------------------------
-//  白天 / 夜间模式
-//  主题只体现在 <html> 的 data-theme 上，具体配色全在 style.css 的变量里。
-// ---------------------------------------------------------------------------
-
-function currentTheme() {
-  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-}
-
-function applyTheme(theme) {
-  const next = theme === 'dark' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', next);
-
-  if (el.btnTheme) {
-    const isDark = next === 'dark';
-    const label = isDark ? '切换为白天模式' : '切换为夜间模式';
-    el.btnTheme.title = label;
-    el.btnTheme.setAttribute('aria-label', label);
-    el.btnTheme.setAttribute('aria-pressed', isDark ? 'true' : 'false');
-  }
-}
-
-function toggleTheme() {
-  const next = currentTheme() === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-
-  if (state.settings) state.settings.theme = next;
-
-  // 主题是设置的一部分，跟着 config.json 一起存，下次启动还是这个模式
-  api.saveSettings({ theme: next }).catch((err) => {
-    console.error('保存主题失败', err);
-    showToast('主题没能保存，重启后会回到原来的模式', 'error');
-  });
-}
-
 /**
  * 应用内的确认弹窗（替代 window.confirm）。
  * 用系统原生 confirm 会有一个副作用：关掉它的那一下点击会被吞掉，
  * 之后点输入框要点两次才能聚焦，看起来就像「输入框点不动」。
  * 返回 Promise<boolean>。
  */
-function confirmDialog(options) {
-  const opts = options || {};
-
-  el.confirmTitle.textContent = opts.title || '确认';
-  el.confirmMessage.textContent = opts.message || '';
-  el.confirmOk.textContent = opts.confirmText || '确定';
-  el.confirmOk.className = `btn ${opts.danger ? 'btn-danger' : 'btn-primary'}`;
-
-  el.confirmModal.classList.remove('hidden');
-  el.confirmCancel.focus();
-
-  return new Promise((resolve) => {
-    function cleanup(result) {
-      el.confirmOk.removeEventListener('click', onOk);
-      el.confirmCancel.removeEventListener('click', onCancel);
-      el.confirmModal.removeEventListener('click', onBackdrop);
-      document.removeEventListener('keydown', onKey);
-      el.confirmModal.classList.add('hidden');
-      resolve(result);
-    }
-    function onOk() { cleanup(true); }
-    function onCancel() { cleanup(false); }
-    function onBackdrop(event) {
-      if (event.target === el.confirmModal) cleanup(false);
-    }
-    function onKey(event) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        cleanup(false);
-      } else if (event.key === 'Enter') {
-        event.preventDefault();
-        cleanup(true);
-      }
-    }
-
-    el.confirmOk.addEventListener('click', onOk);
-    el.confirmCancel.addEventListener('click', onCancel);
-    el.confirmModal.addEventListener('click', onBackdrop);
-    document.addEventListener('keydown', onKey);
-  });
-}
 
 /** 保存历史会话（防抖，避免每敲一个字都写磁盘） */
-function persistConversations(delay) {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    api
-      .saveConversations({ conversations: state.conversations, activeId: state.activeId })
-      .then(() => {
-        // 保存成功，静默
-      })
-      .catch((err) => {
-        console.error('保存会话失败', err);
-        showToast('保存会话失败，请检查磁盘空间', 'error');
-      });
-  }, typeof delay === 'number' ? delay : 350);
-}
 
 // ---------------------------------------------------------------------------
 //  流式文字的重绘
@@ -633,166 +351,6 @@ const streamPainter = (() => {
     }
   };
 })();
-
-// ---------------------------------------------------------------------------
-//  极简 Markdown 渲染
-//  先整体转义 HTML，再按块级/行内规则替换，所以内容是安全的。
-// ---------------------------------------------------------------------------
-
-function esc(text) {
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function renderInline(text) {
-  let out = text;
-
-  // 行内代码 `code` —— 先抽出来占位，避免里面的符号被当成格式
-  const codes = [];
-  out = out.replace(/`([^`\n]+)`/g, (_m, code) => {
-    codes.push(code);
-    return `\u0000C${codes.length - 1}\u0000`;
-  });
-
-  out = out.replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>');
-  out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  out = out.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
-
-  // 链接：只放行 http/https，其他一律当普通文字
-  const links = [];
-  out = out
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, href) => {
-      links.push(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`);
-      return `\u0000L${links.length - 1}\u0000`;
-    })
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (_m, pre, href) => {
-      links.push(`<a href="${href}" target="_blank" rel="noreferrer">${href}</a>`);
-      return `${pre}\u0000L${links.length - 1}\u0000`;
-    });
-
-  out = out.replace(/\u0000C(\d+)\u0000/g, (_m, i) => `<code>${codes[Number(i)]}</code>`);
-  out = out.replace(/\u0000L(\d+)\u0000/g, (_m, i) => links[Number(i)]);
-  return out;
-}
-
-function renderMarkdown(source, options) {
-  let text = String(source == null ? '' : source).replace(/\r\n/g, '\n');
-
-  // 流式生成中，代码块可能只来了一半：临时补个结尾，免得显示成乱码
-  if (options && options.streaming) {
-    const fences = (text.match(/```/g) || []).length;
-    if (fences % 2 === 1) text += '\n```';
-  }
-
-  // 1. 先把 ``` 代码块抽出来，避免块内内容被解析
-  const blocks = [];
-  const withoutFences = text.replace(/```([\w+#.-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-    const cls = lang ? ` class="language-${esc(lang.toLowerCase())}"` : '';
-    blocks.push(`<pre><code${cls}>${esc(code.replace(/\n$/, ''))}</code></pre>`);
-    return `\n\u0000B${blocks.length - 1}\u0000\n`;
-  });
-
-  // 2. 逐行处理块级元素
-  const lines = esc(withoutFences).split('\n');
-  const out = [];
-  let listType = null;
-
-  const closeList = () => {
-    if (listType) {
-      out.push(`</${listType}>`);
-      listType = null;
-    }
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (/^\u0000B\d+\u0000$/.test(trimmed)) {
-      closeList();
-      out.push(trimmed);
-      continue;
-    }
-
-    if (!trimmed) {
-      closeList();
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-      closeList();
-      out.push('<hr />');
-      continue;
-    }
-
-    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      closeList();
-      const level = Math.min(3, heading[1].length);
-      out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-      continue;
-    }
-
-    const quote = trimmed.match(/^&gt;\s?(.*)$/);
-    if (quote) {
-      closeList();
-      out.push(`<blockquote>${renderInline(quote[1])}</blockquote>`);
-      continue;
-    }
-
-    const bullet = trimmed.match(/^[-*+]\s+(.*)$/);
-    if (bullet) {
-      if (listType !== 'ul') {
-        closeList();
-        out.push('<ul>');
-        listType = 'ul';
-      }
-      out.push(`<li>${renderInline(bullet[1])}</li>`);
-      continue;
-    }
-
-    const ordered = trimmed.match(/^\d+[.)]\s+(.*)$/);
-    if (ordered) {
-      if (listType !== 'ol') {
-        closeList();
-        out.push('<ol>');
-        listType = 'ol';
-      }
-      out.push(`<li>${renderInline(ordered[1])}</li>`);
-      continue;
-    }
-
-    closeList();
-
-    // 心理描写：以标记开头的整段单独成块，渲染成弱化的旁白样式。
-    // 标记本身不显示 —— 有样式就不需要文字标记占位了。
-    // 只认「段落以标记开头」，所以正文里提到「【心理】」这三个字不会被误伤；
-    // 流式生成时半截标记（「【心」）也匹配不上，不会闪。
-    const inner = trimmed.match(/^【(心理|内心|心声)】\s*(.*)$/);
-    if (inner) {
-      out.push(`<p class="msg-inner">${renderInline(inner[2])}</p>`);
-      continue;
-    }
-
-    const aside = trimmed.match(/^【(旁白|上帝视角|全知)】\s*(.*)$/);
-    if (aside) {
-      out.push(`<p class="msg-aside">${renderInline(aside[2])}</p>`);
-      continue;
-    }
-
-    out.push(`<p>${renderInline(trimmed)}</p>`);
-  }
-  closeList();
-
-  let html = out.join('\n');
-
-  // 3. 还原代码块
-  html = html.replace(/\u0000B(\d+)\u0000/g, (_m, i) => blocks[Number(i)]);
-  return html;
-}
 
 // ---------------------------------------------------------------------------
 //  渲染：会话列表、标题、消息
@@ -952,6 +510,10 @@ async function applyCharacterChoice(characterId) {
 
   convo.characterId = next.id;
   convo.updatedAt = now();
+
+  // 角色卡上声明过「属性」就种进状态面板 —— AI 第一轮就知道该维护哪些字段，
+  // 不用等它自己碰巧输出一个「【金币】：100」
+  seedPanelFromCharacters(convo, [next]);
 
   if (next.firstMes && untouched) {
     // 空对话绑上带开场白的角色时，自动把开场白放进去，省得每次手动开个头
@@ -1460,6 +1022,11 @@ function convoPanel(convo) {
  * 把会话历史里出现过的面板字段同步到 convo.panel。
  * 取「最近一条提到该字段的助手消息」的值，所以手动改过的旧轮次会被更新的值覆盖。
  * 返回是否发生了变化 —— 调用方据此决定要不要重绘面板。
+ *
+ * 注意这里是**累积**而不是「从历史重建」：
+ * 角色卡带过来的字段、以及用户在面板里手动加的字段，这一轮模型可能压根没提到
+ * （小模型经常不听话），从零重建会把它们连值一起抹掉。
+ * 所以以现有面板为底，把历史里扫到的值盖上去。
  */
 function syncConvoPanel(convo) {
   if (!convo || !Array.isArray(convo.messages)) return false;
@@ -1467,12 +1034,13 @@ function syncConvoPanel(convo) {
   const beforeFields = convoPanelFields(convo).join('\u0001');
   const beforePanel = JSON.stringify(convoPanel(convo));
 
-  // 先按出现顺序收集字段名：从最早的消息往后扫，后面的同名不重复加。
-  // 每扫到新字段就并进 known —— 这样后期扫描不再依赖形态猜测，
-  // 正文里的「【某某】：长句」不会被误收。
-  const order = [];
+  const existingFields = convoPanelFields(convo);
+  const existingPanel = convoPanel(convo);
+
+  // 字段顺序：先保留已经有的（角色卡种下的 / 手动加的），新发现的追加在后面。
+  const order = [...existingFields];
+  const known = new Set(order);
   const latest = new Map();
-  const known = new Set();
 
   for (const msg of convo.messages) {
     if (!msg || msg.role !== 'assistant') continue;
@@ -1481,7 +1049,8 @@ function syncConvoPanel(convo) {
 
     const found = extractPanelFromText(content, [...known]);
     for (const [name, value] of found) {
-      if (!order.includes(name)) {
+      if (!known.has(name)) {
+        if (order.length >= MAX_PANEL_FIELDS) continue;
         order.push(name);
         known.add(name);
       }
@@ -1489,11 +1058,10 @@ function syncConvoPanel(convo) {
     }
   }
 
-  if (order.length > MAX_PANEL_FIELDS) order.length = MAX_PANEL_FIELDS;
-
+  // 值：历史里扫到的优先（最新一轮说了算），没扫到的沿用面板里现有的
   const panel = {};
   for (const name of order) {
-    const value = latest.get(name);
+    const value = latest.has(name) ? latest.get(name) : existingPanel[name];
     if (value !== undefined) panel[name] = value;
   }
 
@@ -1526,7 +1094,18 @@ function formatPanelForPrompt(convo) {
     if (value === undefined || value === '') continue;
     lines.push(`【${name}】：${value}`);
   }
-  if (!lines.length) return '';
+
+  // 一个值都还没有 = 刚用角色卡的属性模板开的局。
+  // 这时候也要把字段名告诉模型，否则它不知道要维护哪些状态 ——
+  // 而「模型得自己碰巧输出【金币】：100」正是属性模板要解决的冷启动问题。
+  if (!lines.length) {
+    return (
+      '[当前状态]\n' +
+      `本局需要维护这些状态字段：${fields.join('、')}\n` +
+      '请在每次回复的末尾，用「【字段】：值」的格式把它们完整输出一遍' +
+      '（还不知道的写「未知」）；之后每轮照抄并更新，不要凭空改动已有数值。'
+    );
+  }
 
   return (
     '[当前状态]\n' +
@@ -2714,6 +2293,7 @@ function fillSettingsForm(settings) {
   el.s.sendOnEnter.checked = settings.sendOnEnter !== false;
   el.s.showDate.checked = settings.showDate !== false;
   el.s.showUsage.checked = settings.showUsage !== false;
+  el.s.commonAttrs.value = (Array.isArray(settings.commonAttributes) ? settings.commonAttributes : []).join(', ');
 }
 
 // ------------------------------ 服务商编辑 ------------------------------
@@ -2861,7 +2441,9 @@ function readSettingsForm() {
     systemPrompt: el.s.system.value,
     sendOnEnter: el.s.sendOnEnter.checked,
     showDate: el.s.showDate.checked,
-    showUsage: el.s.showUsage.checked
+    showUsage: el.s.showUsage.checked,
+    // 和「服务商模型列表」一样是「分隔符拆开的字符串列表」，直接复用那个解析
+    commonAttributes: parseModels(el.s.commonAttrs.value).slice(0, 40)
   };
 }
 
@@ -3242,37 +2824,15 @@ async function addWorldbookCharacters(ids) {
   showToast(ok ? `已加入 ${picked.length} 个角色副本` : '加入失败，没能写入磁盘', ok ? 'ok' : 'error');
 }
 
-/** 在本书里新建一个空白角色副本，然后直接进编辑器 */
-async function newWorldbookCharacter() {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  book.characters = worldbookCharacters(book);
-  const character = {
-    id: newWorldbookCharId(),
-    name: '新角色',
-    avatar: '',
-    description: '',
-    personality: '',
-    scenario: '',
-    firstMes: '',
-    mesExample: '',
-    systemPrompt: '',
-    postHistoryInstructions: '',
-    creatorNotes: '',
-    tags: [],
-    source: 'manual',
-    createdAt: now(),
-    updatedAt: now()
-  };
-  book.characters.push(character);
-  book.updatedAt = now();
-
-  renderWorldbookChars();
-  renderWorldbookPage();
-  await persistLibrary();
-
-  editWorldbookCharacter(character.id);
+/**
+ * 在本书里新建一个角色副本。
+ * 和角色库那边一样：先只做成草稿给用户填，点「保存角色」之后才真的加进这本书 ——
+ * 免得点一下就在书里多出一个空的「新角色」。
+ */
+function newWorldbookCharacter() {
+  if (!currentWorldbook()) return;
+  charEditorScope = 'worldbook';
+  startCharDraft();
 }
 
 /** 从本书移除一个角色副本（角色库里的角色不动） */
@@ -3715,6 +3275,20 @@ function bindEvents() {
   el.btnCloseChars.addEventListener('click', closeCharsModal);
   el.btnNewChar.addEventListener('click', newCharacter);
   el.btnSaveChar.addEventListener('click', saveCharacter);
+  // 加点属性：按钮和回车都能加
+  el.btnAddAttr.addEventListener('click', () => {
+    addCharAttr(el.c.attrNew.value);
+    el.c.attrNew.value = '';
+    el.c.attrNew.focus();
+  });
+
+  el.c.attrNew.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    addCharAttr(el.c.attrNew.value);
+    el.c.attrNew.value = '';
+  });
+
   el.btnDelChar.addEventListener('click', deleteCharacter);
   el.btnImportCard.addEventListener('click', importCards);
 
@@ -3942,6 +3516,9 @@ function persistCharacters(immediate) {
 function openCharsModal() {
   // 弹窗现在只是「编辑某一个角色」的表单，没有列表了。
   // 谁打开它谁负责先设好 editingCharacterId / charEditorScope。
+  // 编辑器的入口指向了别的角色，说明「新建」那个草稿已经被放弃了，顺手清掉。
+  if (charDraft && editingCharacterId !== charDraft.character.id) discardCharDraft();
+
   let current = editorCharacterById(editingCharacterId);
 
   if (!current) {
@@ -3965,24 +3542,49 @@ function openCharsModal() {
 function updateCharEditorScopeUi() {
   const inBook = charEditorScope === 'worldbook';
   const book = inBook ? currentWorldbook() : null;
+  const creating = isCharDraft();
 
   if (el.charsTitle) {
-    el.charsTitle.textContent = inBook ? '编辑本书角色' : '编辑角色';
+    if (creating) el.charsTitle.textContent = inBook ? '新建本书角色' : '新建角色';
+    else el.charsTitle.textContent = inBook ? '编辑本书角色' : '编辑角色';
   }
   if (el.charsSub) {
-    el.charsSub.textContent = inBook
-      ? `这本书里的独立副本，改它不影响角色库${book ? ` · ${book.name}` : ''}`
-      : '改完记得点右下角「保存角色」';
+    if (creating) {
+      // 说清楚「现在还没这个东西」，免得用户以为点一下就已经建好了
+      el.charsSub.textContent = inBook
+        ? `填好内容点「保存角色」才会加进这本书${book ? ` · ${book.name}` : ''}`
+        : '填好内容点「保存角色」，保存后才会出现在角色库里';
+    } else {
+      el.charsSub.textContent = inBook
+        ? `这本书里的独立副本，改它不影响角色库${book ? ` · ${book.name}` : ''}`
+        : '改完记得点右下角「保存角色」';
+    }
   }
 }
 
-function closeCharsModal() {
+async function closeCharsModal() {
+  // 新建的角色还没保存：关掉就等于放弃，先问一句，免得辛苦填的设定白写
+  if (isCharDraft()) {
+    const typed = el.c.name.value.trim();
+    const ok = await confirmDialog({
+      title: '放弃新建',
+      message: `「${typed || '新角色'}」还没保存，关掉就不会创建这个角色。`,
+      confirmText: '放弃',
+      danger: true
+    });
+    if (!ok) return;
+  }
+
+  // 草稿从没进过任何列表，丢掉它不用刷新界面
+  discardCharDraft();
   el.charsModal.classList.add('hidden');
   el.input.focus();
 }
 
 /** 底部提示：跟着编辑器作用域变，免得不知道改的是哪一份 */
 function charFootHintText(character) {
+  // 还没保存的新角色没什么来源好说的，先提醒它还不存在
+  if (isCharDraft()) return '还没保存 · 点右下角「保存角色」才会创建这个角色';
   if (charEditorScope === 'worldbook') return '改的是世界书里的副本，角色库里的那个角色不受影响';
   if (!character) return '角色卡只保存在你自己电脑上';
   if (character.source === 'png') return '来自酒馆 PNG 角色卡';
@@ -3994,7 +3596,8 @@ function charFootHintText(character) {
 function showCharForm(show) {
   el.charForm.classList.toggle('hidden', !show);
   el.charEmpty.classList.toggle('hidden', !!show);
-  el.btnDelChar.disabled = !show;
+  // 新建的新角色还没保存，没有可删的东西
+  el.btnDelChar.disabled = !show || isCharDraft();
   el.btnSaveChar.disabled = !show;
   if (!show) el.charFootHint.textContent = charFootHintText(null);
 }
@@ -4049,7 +3652,14 @@ function renderWorldbookPage() {
   for (const book of list) grid.appendChild(worldbookCard(book));
 }
 
-/** 一张世界书卡片：世界名 + 设定条数 / 角色数 + 编辑/游玩 */
+/**
+ * 一张世界书卡片：世界名 + 设定条数 / 角色数 + 编辑/游玩
+ *
+ * 这里**故意不做**角色卡那种悬停删除 `×`：
+ * 一本书里可能攒了很多条目和角色副本，删掉找不回来，
+ * 所以删除入口刻意留在编辑器里（「删除本书」）—— 得先点进去、看得见全书内容再删。
+ * 角色卡可以快捷删，是因为单张角色卡的信息量小、重建成本低。
+ */
 function worldbookCard(book) {
   const card = document.createElement('div');
   card.className = 'char-card';
@@ -4152,6 +3762,10 @@ function startWorldPlay() {
   convo.gmMode = true;
   convo.title = book.name;
   convo.updatedAt = now();
+
+  // 本书角色卡上声明的属性一起种进面板（同名以先出现的为准）。
+  // 世界模式里玩家角色只有名字+简介，没有角色卡，所以属性只能来自书里的角色。
+  seedPanelFromCharacters(convo, worldbookCharacters(book));
 
   // 开场：书里写了就用书里的；没写就让模型按设定现生成一段
   const opening = String(book.opening || '').trim();
@@ -4341,12 +3955,25 @@ function renderCharacterPage() {
   for (const c of list) grid.appendChild(characterCard(c));
 }
 
-/** 一张角色卡：头像 + 名字 + 来源 + 编辑/聊天 */
+/** 一张角色卡：头像 + 名字 + 来源 + 编辑/聊天，右上角悬停浮出删除 */
 function characterCard(c) {
   const card = document.createElement('div');
   card.className = 'char-card';
   card.setAttribute('role', 'listitem');
   card.title = c.name;
+
+  // 删除：静止时是透明的，鼠标移上来才浮出来 —— 跟左侧会话列表的 × 同一套。
+  // 这样卡片平时还是干净的「编辑 / 聊天」两个按钮，不至于误点。
+  const btnDel = document.createElement('button');
+  btnDel.type = 'button';
+  btnDel.className = 'char-card-del';
+  btnDel.textContent = '×';
+  btnDel.title = '删除这个角色';
+  btnDel.setAttribute('aria-label', `删除角色：${c.name}`);
+  btnDel.addEventListener('click', (event) => {
+    event.stopPropagation();
+    deleteCharacterById(c.id, 'library');
+  });
 
   const av = document.createElement('div');
   av.className = 'char-card-avatar';
@@ -4365,7 +3992,14 @@ function characterCard(c) {
 
   const sub = document.createElement('div');
   sub.className = 'char-card-sub';
-  sub.textContent = c.source === 'png' ? '酒馆角色卡' : c.source === 'json' ? 'JSON 角色卡' : '手写';
+  // 来源 + 分类标签挤在同一行：卡片高度不变，标签也不会把卡片撑得参差不齐。
+  // 标签是「这张卡属于什么类型」（作品/风格/用途），只显示前几个，多了省略。
+  const subBits = [c.source === 'png' ? '酒馆角色卡' : c.source === 'json' ? 'JSON 角色卡' : '手写'];
+  for (const tag of (Array.isArray(c.tags) ? c.tags : []).slice(0, 3)) {
+    if (String(tag).trim()) subBits.push(String(tag).trim());
+  }
+  sub.textContent = subBits.join(' · ');
+  sub.title = subBits.join(' · ');
 
   const actions = document.createElement('div');
   actions.className = 'char-card-actions';
@@ -4383,7 +4017,7 @@ function characterCard(c) {
   btnChat.addEventListener('click', () => chatWithCharacter(c.id));
 
   actions.append(btnEdit, btnChat);
-  card.append(av, name, sub, actions);
+  card.append(btnDel, av, name, sub, actions);
   return card;
 }
 
@@ -4470,7 +4104,8 @@ function shrinkAvatar(dataUrl) {
 }
 
 async function pickAvatar() {
-  if (!characterById(editingCharacterId)) return;
+  // 用编辑器那套查找：正在新建的草稿不在角色库里，但一样要能传头像
+  if (!editorCharacterById(editingCharacterId)) return;
 
   let result;
   try {
@@ -4519,9 +4154,147 @@ function fillCharForm(character) {
   charDraftAvatar = character.avatar || '';
   renderCharAvatar();
 
+  // 属性：复制一份当草稿，保存时才写回角色卡
+  charAttrs = characterAttrs(character);
+  renderCharAttrs();
+
   el.charFootHint.textContent = charFootHintText(character);
 
   showCharForm(true);
+}
+
+// ---------------------------------------------------------------------------
+//  角色属性（状态面板的字段模板）
+//
+//  玩法：在角色卡上先声明「这个角色有哪些属性」（金币/上衣/下衣…），
+//  绑定时把它们种进会话的状态面板 —— 于是 AI 第一轮就知道该维护哪些字段，
+//  不用等它自己碰巧输出一个【金币】：100。
+//
+//  这里填的是**初始值（模板）**；进游戏之后在面板里改的是**那一局的当前值**。
+//  两者分开存，改角色卡不会影响正在进行的游戏。
+// ---------------------------------------------------------------------------
+
+// 编辑器打开期间的属性草稿，点「保存角色」才写回角色卡（和 charDraftAvatar 一个套路）
+let charAttrs = [];
+
+/** 读角色卡上的属性（容错老数据 / 导入的角色卡） */
+function characterAttrs(character) {
+  if (!character || !Array.isArray(character.attributes)) return [];
+  return character.attributes
+    .filter((a) => a && typeof a.name === 'string' && a.name.trim())
+    .map((a) => ({
+      name: a.name.trim().slice(0, 24),
+      value: String(a.value == null ? '' : a.value)
+    }));
+}
+
+/** 重画编辑器的属性区：上面的快捷候选词 + 下面已加的属性行 */
+function renderCharAttrs() {
+  if (!el.c.attrList) return;
+
+  // 快捷候选词：已经在属性里的就不再显示，免得点了个寂寞
+  const used = new Set(charAttrs.map((a) => a.name));
+  const quick = (state.settings && state.settings.commonAttributes) || [];
+  el.c.attrQuick.innerHTML = '';
+  for (const name of quick) {
+    if (used.has(name)) continue;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'attr-quick-btn';
+    btn.textContent = `＋ ${name}`;
+    btn.addEventListener('click', () => addCharAttr(name));
+    el.c.attrQuick.appendChild(btn);
+  }
+  el.c.attrQuick.classList.toggle('hidden', !el.c.attrQuick.childElementCount);
+
+  // 已加的属性：名字 + 初始值输入框 + 移除。
+  // 输入框里改值只更新草稿，不重画 —— 一重画光标就跳走了。
+  el.c.attrList.innerHTML = '';
+  charAttrs.forEach((attr, index) => {
+    const row = document.createElement('div');
+    row.className = 'attr-row';
+
+    const name = document.createElement('span');
+    name.className = 'attr-name';
+    name.textContent = attr.name;
+    name.title = attr.name;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'attr-value';
+    input.value = attr.value;
+    input.spellcheck = false;
+    input.placeholder = '初始值（可以留空）';
+    input.setAttribute('aria-label', `${attr.name} 的初始值`);
+    input.addEventListener('input', () => { attr.value = input.value; });
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'panel-del';
+    del.textContent = '✕';
+    del.title = '删掉这个属性';
+    del.addEventListener('click', () => {
+      charAttrs.splice(index, 1);
+      renderCharAttrs();
+    });
+
+    row.append(name, input, del);
+    el.c.attrList.appendChild(row);
+  });
+}
+
+/** 加一个属性：保留字拦下，重名跳过 */
+function addCharAttr(rawName) {
+  const name = String(rawName || '').trim().slice(0, 24);
+  if (!name) return;
+
+  if (!panelFieldAllowed(name)) {
+    showToast(`「${name}」是状态栏的保留字段名，换一个吧`, 'error');
+    return;
+  }
+  if (charAttrs.some((a) => a.name === name)) {
+    showToast(`已经有「${name}」了`);
+    return;
+  }
+  if (charAttrs.length >= MAX_PANEL_FIELDS) return;
+
+  charAttrs.push({ name, value: '' });
+  renderCharAttrs();
+}
+
+/**
+ * 把角色卡上的属性种进会话的状态面板 —— 这就是属性模板唯一的作用。
+ *
+ * 只补面板里还没有的字段，同名的保留面板里的当前值：
+ * 半路给会话绑角色，不该把这一局已经跑出来的数值冲掉。
+ */
+function seedPanelFromCharacters(convo, list) {
+  if (!convo || !Array.isArray(list)) return false;
+
+  const fields = [...convoPanelFields(convo)];
+  const panel = { ...convoPanel(convo) };
+  const known = new Set(fields);
+
+  for (const character of list) {
+    for (const attr of characterAttrs(character)) {
+      if (known.has(attr.name)) continue;
+      if (!panelFieldAllowed(attr.name)) continue;
+      if (fields.length >= MAX_PANEL_FIELDS) break;
+
+      fields.push(attr.name);
+      known.add(attr.name);
+      // 初始值只在「这个字段是刚种进去的」时候落地
+      if (String(attr.value || '').trim()) panel[attr.name] = String(attr.value).slice(0, 500);
+    }
+  }
+
+  const before = convoPanelFields(convo).join('\u0001');
+  if (before === fields.join('\u0001')) return false;
+
+  convo.panelFields = fields;
+  convo.panel = panel;
+  convo.updatedAt = now();
+  return true;
 }
 
 /** 把表单里的内容写回内存里的角色对象（切走或保存前调用） */
@@ -4543,15 +4316,40 @@ function stashCharForm() {
   character.systemPrompt = el.c.system.value;
   character.postHistoryInstructions = el.c.post.value;
   character.creatorNotes = el.c.notes.value;
+  // 属性是编辑期间的草稿（charAttrs），保存时才写回角色卡
+  character.attributes = charAttrs
+    .filter((a) => a.name.trim())
+    .map((a) => ({ name: a.name.trim().slice(0, 24), value: String(a.value || '').slice(0, 200) }))
+    .slice(0, MAX_PANEL_FIELDS);
   character.avatar = charDraftAvatar;
   character.updatedAt = now();
 }
 
+/**
+ * 角色列表页的「＋ 新建角色」。
+ * 先把作用域钉死在角色库 —— 上一次可能是在世界书里编辑副本，作用域还留着。
+ */
 function newCharacter() {
+  charEditorScope = 'library';
+  startCharDraft();
+}
+
+/**
+ * 新建角色：只做一个「草稿」塞进编辑器给用户填。
+ * 保存之前它不进角色库 / 世界书，也不写磁盘；关掉编辑器就当没建过。
+ */
+function startCharDraft() {
+  // 上一个角色的表单里可能还有没保存的改动，先收进内存（和以前一样），
+  // 再把上一份没保存完的草稿丢掉，免得留下一个永远不会被创建的幽灵角色。
   stashCharForm();
+  discardCharDraft();
+
+  const scope = charEditorScope;
+  const book = scope === 'worldbook' ? currentWorldbook() : null;
+  if (scope === 'worldbook' && !book) return;
 
   const character = {
-    id: charEditorScope === 'worldbook' ? newWorldbookCharId() : uid(),
+    id: scope === 'worldbook' ? newWorldbookCharId() : uid(),
     name: '新角色',
     avatar: '',
     description: '',
@@ -4563,14 +4361,36 @@ function newCharacter() {
     postHistoryInstructions: '',
     creatorNotes: '',
     tags: [],
+    attributes: [],
     source: 'manual',
     createdAt: now(),
     updatedAt: now()
   };
 
-  if (charEditorScope === 'worldbook') {
-    const book = currentWorldbook();
-    if (!book) return;
+  charDraft = { character, scope, bookId: book ? book.id : null };
+  editingCharacterId = character.id;
+
+  fillCharForm(character);
+  updateCharEditorScopeUi();
+  el.charsModal.classList.remove('hidden');
+
+  el.c.name.focus();
+  el.c.name.select();
+}
+
+/**
+ * 把新建的草稿真正写进角色库 / 世界书。
+ * 只有点「保存角色」会走到这里 —— 这就是「保存后才生成」那一步。
+ */
+function commitCharDraft() {
+  if (!charDraft) return true;
+
+  const { character, scope, bookId } = charDraft;
+
+  if (scope === 'worldbook') {
+    const book = worldbookById(bookId);
+    // 书在编辑期间被删掉了，这个草稿就没有落脚的地方
+    if (!book) return false;
     book.characters = worldbookCharacters(book);
     book.characters.push(character);
     book.updatedAt = now();
@@ -4578,13 +4398,15 @@ function newCharacter() {
     state.characters = [...characters(), character];
   }
 
-  editingCharacterId = character.id;
+  charDraft = null;
+  return true;
+}
 
-  renderCharacterPage();
-  fillCharForm(character);
-
-  el.c.name.focus();
-  el.c.name.select();
+/** 丢掉没保存的草稿：它从来没进过任何列表，忘掉就行 */
+function discardCharDraft() {
+  if (!charDraft) return;
+  if (editingCharacterId === charDraft.character.id) editingCharacterId = null;
+  charDraft = null;
 }
 
 async function saveCharacter() {
@@ -4601,28 +4423,50 @@ async function saveCharacter() {
     return;
   }
 
+  // 这一下到底是「新建」还是「改已有的」，要在落盘前记下来：
+  // 草稿一提交 charDraft 就清空了，后面就分不出来了。
+  const creating = isCharDraft();
+  const scope = creating ? charDraft.scope : charEditorScope;
+
   stashCharForm();
+
+  // 新建的角色到这一刻才真正被创建（进角色库 / 进这本书）
+  if (creating && !commitCharDraft()) {
+    showToast('这本书已经不在了，角色没能创建', 'error');
+    return;
+  }
 
   // 名字可能被规整过，重新填一遍保证界面和数据一致
   renderCharacterPage();
   fillCharForm(character);
+  // 新建的那一行提示语要从「还没保存」换成正常的
+  updateCharEditorScopeUi();
   renderAll();
 
   // 改的是书里的副本，书名旁边那排和左栏计数都要跟着刷新
-  if (charEditorScope === 'worldbook') {
+  if (scope === 'worldbook') {
     renderWorldbookChars();
     renderWorldbookPage();
   }
 
   await persistCharacters();
-  showToast(`角色「${character.name}」已保存`, 'ok');
+  showToast(creating ? `角色「${character.name}」已创建` : `角色「${character.name}」已保存`, 'ok');
 }
 
-async function deleteCharacter() {
-  const character = editorCharacterById(editingCharacterId);
-  if (!character) return;
+/**
+ * 删除一个角色。
+ * scope：'library' = 从角色库删掉（默认）；'worldbook' = 只从当前这本书里移除副本。
+ *
+ * 两个入口共用这一份逻辑：角色卡右上角的 ×，和编辑弹窗底部的「删除角色」。
+ * 以前它俩是「谁打开编辑器谁负责」，所以在卡片上删不了 —— 得先点进编辑。
+ */
+async function deleteCharacterById(id, scope) {
+  const inBook = scope === 'worldbook';
 
-  const inBook = charEditorScope === 'worldbook';
+  const character = inBook
+    ? worldbookCharacters(currentWorldbook()).find((c) => c.id === id)
+    : characters().find((c) => c.id === id);
+  if (!character) return;
 
   const ok = await confirmDialog({
     title: inBook ? '移除角色' : '删除角色',
@@ -4649,10 +4493,12 @@ async function deleteCharacter() {
     }
   }
 
-  // 弹窗现在只是「编辑这一个角色」的表单，角色没了就没有可编辑的对象 —— 直接关掉。
-  // 列表页 / 世界书的副本条会在下面刷新，入口都还在原处。
-  editingCharacterId = null;
-  closeCharsModal();
+  // 编辑器如果正开在这个角色上，就没有可编辑的对象了 —— 关掉它。
+  // （从卡片删的时候编辑器根本没开，这一段会跳过。）
+  if (editingCharacterId === character.id) {
+    editingCharacterId = null;
+    if (!el.charsModal.classList.contains('hidden')) closeCharsModal();
+  }
 
   if (inBook) {
     // 书里的副本不受会话影响，只需要刷新书那边的界面
@@ -4665,6 +4511,17 @@ async function deleteCharacter() {
   await persistCharacters();
 
   showToast(inBook ? `已移除「${character.name}」` : `已删除「${character.name}」`);
+}
+
+/** 编辑弹窗底部的「删除角色」：删的就是编辑器里正在编辑的这个 */
+async function deleteCharacter() {
+  // 还没保存的新角色没有任何东西可删（按钮也是禁用的，这里只是兜底）
+  if (isCharDraft()) return;
+
+  const character = editorCharacterById(editingCharacterId);
+  if (!character) return;
+
+  await deleteCharacterById(character.id, charEditorScope);
 }
 
 async function importCards() {

@@ -7,7 +7,8 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "smoke": "electron tools/smoke-test.js"
   },
   "devDependencies": {
     "electron": "^44.4.3"

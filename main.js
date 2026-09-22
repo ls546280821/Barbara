@@ -65,6 +65,15 @@ const COMMON_MODELS = [...new Set(PROVIDER_PRESETS.flatMap((p) => p.models))];
 
 const DEFAULT_PROVIDER_ID = 'p1';
 
+// 角色「属性」的快捷候选词。
+// 在角色编辑器里点一下就能多一个属性字段名，纯粹是省打字 —— 不承载任何逻辑，
+// 所以它就是一个字符串数组，放在设置里可编辑就够了，不值得单开一套「管理」界面。
+// （真到了需要给属性附加额外信息的时候 —— 类型、默认值、是否常驻 —— 那才值得升级。）
+const DEFAULT_COMMON_ATTRIBUTES = [
+  '金币', '生命', '体力', '心情', '好感度',
+  '时间', '地点', '天气', '背包', '线索'
+];
+
 const DEFAULT_SETTINGS = {
   // 可以配置多个服务商，每个都有自己的地址、Key 和模型列表
   providers: [
@@ -338,6 +347,21 @@ function normalizeSettings(saved) {
 
   // 界面主题
   s.theme = raw.theme === 'dark' ? 'dark' : 'light';
+
+  // 常用属性候选词：去重、去空、限个数。
+  // 注意判断的是「磁盘上有没有这个键」—— 用户把清单清空是合法操作，
+  // 不能因为合并结果为空就又把默认值塞回去。
+  const rawAttrs = Array.isArray(raw.commonAttributes) ? raw.commonAttributes : DEFAULT_COMMON_ATTRIBUTES;
+  const seenAttrs = new Set();
+  s.commonAttributes = rawAttrs
+    .filter((n) => typeof n === 'string')
+    .map((n) => n.trim().slice(0, 24))
+    .filter((n) => {
+      if (!n || seenAttrs.has(n)) return false;
+      seenAttrs.add(n);
+      return true;
+    })
+    .slice(0, 40);
 
   // 清掉旧版本的扁平字段，避免文件里同时存在两套数据
   delete s.baseUrl;
