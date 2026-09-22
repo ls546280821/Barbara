@@ -3595,8 +3595,9 @@ function fillSettingsForm(settings) {
     ? settings.imageProviderId
     : '';
   el.s.imageModel.value = settings.imageModel || '';
-  el.s.imageSize.value = settings.imageSize || '1024x1024';
   fillModelSelect(el.s.imageModel, el.s.imageProvider.value, settings.imageModel, '（先在左边选一个服务商）');
+  // 尺寸的可选项跟着生图模型走，且会纠正该模型不支持的旧值
+  fillImageSizeOptions(el.s.imageModel.value, settings.imageSize);
 
   // 语义检索：同样是一个「不启用」+ 全部服务商
   el.s.ragEnabled.checked = settings.ragEnabled === true;
@@ -3763,7 +3764,7 @@ function readSettingsForm() {
     })(),
     imageProviderId: el.s.imageProvider.value || '',
     imageModel: el.s.imageModel.value.trim(),
-    imageSize: el.s.imageSize.value.trim() || '1024x1024',
+    imageSize: el.s.imageSize.value || '',
     ragEnabled: el.s.ragEnabled.checked,
     embeddingProviderId: el.s.embeddingProvider.value || '',
     embeddingModel: el.s.embeddingModel.value.trim(),
@@ -3890,6 +3891,61 @@ function catalogForBaseUrl(baseUrl) {
 }
 
 /**
+ * 各生图模型支持的图片尺寸。
+ *
+ * 这个必须按模型区分：智谱 glm-image 只认固定的 7 个尺寸（默认 1280x1280），
+ * 而 Barbara 过去一律发 1024x1024，于是被接口拒掉（智谱错误码 1210「参数有误」）。
+ * 参数来自智谱官方 OpenAPI 的 CreateImageRequest.size 说明。
+ */
+const IMAGE_SIZE_RULES = [
+  {
+    match: /^glm-image$/i,
+    label: 'GLM-Image',
+    sizes: ['1280x1280', '1568x1056', '1056x1568', '1472x1088', '1088x1472', '1728x960', '960x1728'],
+    custom: { min: 1024, max: 2048, step: 32 },
+    note: '默认 1280x1280。自定义需在 1024-2048 之间、且是 32 的整数倍'
+  },
+  {
+    match: /^cogview/i,
+    label: 'CogView',
+    sizes: ['1024x1024', '768x1344', '864x1152', '1344x768', '1152x864', '1440x720', '720x1440'],
+    custom: { min: 512, max: 2048, step: 16 },
+    note: '默认 1024x1024。自定义需在 512-2048 之间、且是 16 的整数倍'
+  }
+];
+
+const DEFAULT_IMAGE_SIZES = ['1024x1024', '1024x1792', '1792x1024', '512x512'];
+
+function imageSizeRule(model) {
+  const name = String(model || '').trim();
+  return IMAGE_SIZE_RULES.find((r) => r.match.test(name)) || null;
+}
+
+/** 某个生图模型可选的尺寸列表 */
+function sizesForImageModel(model) {
+  const rule = imageSizeRule(model);
+  return rule ? rule.sizes : DEFAULT_IMAGE_SIZES;
+}
+
+/** 尺寸是否合法：已知模型按规则校验，未知模型只做基本格式检查 */
+function isValidImageSize(model, size) {
+  const value = String(size || '').trim().toLowerCase();
+  if (!/^\d{2,4}x\d{2,4}$/.test(value)) return false;
+
+  const rule = imageSizeRule(model);
+  if (!rule) return true;
+
+  if (rule.sizes.includes(value)) return true;
+
+  // 不在推荐列表里也可能合法（自定义尺寸），按规则体检
+  if (!rule.custom) return false;
+  const [w, h] = value.split('x').map(Number);
+  const { min, max, step } = rule.custom;
+  const inRange = (n) => n >= min && n <= max && n % step === 0;
+  return inRange(w) && inRange(h);
+}
+
+/**
  * 生图模型优先选对的。
  *
  * 坑：provider.models 里通常全是文本模型，生图那一组下拉如果直接沿用，
@@ -3929,6 +3985,47 @@ function preferImageModel(provider) {
       'ok'
     );
   }
+}
+
+/**
+ * 按当前生图模型重建尺寸下拉，并尽量保留用户原来的选择。
+ * 模型不认识时用通用尺寸，不拦着用户。
+ */
+function fillImageSizeOptions(model, current) {
+  const select = el.s.imageSize;
+  if (!select) return;
+
+  const sizes = sizesForImageModel(model);
+  const wanted = String(current || '').trim();
+
+  clear(select);
+  for (const size of sizes) {
+    select.appendChild(h('option', { value: size, text: size }));
+  }
+
+  // 已保存的尺寸不在这个模型的列表里：要么直接纠正，要么明确标出来
+  if (wanted && !sizes.includes(wanted)) {
+    if (isValidImageSize(model, wanted)) {
+      // 是合法自定义尺寸，保留
+      select.appendChild(h('option', { value: wanted, text: `${wanted}（自定义）` }));
+      select.value = wanted;
+    } else {
+      // 非法（比如 glm-image 配 1024x1024）——直接切到默认值，别让它再撞一次
+      const rule = imageSizeRule(model);
+      const fallback = sizes[0];
+      select.value = fallback;
+      if (rule) {
+        showToast(
+          `${rule.label} 不支持 ${wanted}，已改成 ${fallback}` +
+            (rule.note ? `（${rule.note}）` : ''),
+          'ok'
+        );
+      }
+    }
+    return;
+  }
+
+  select.value = wanted && sizes.includes(wanted) ? wanted : sizes[0];
 }
 
 /** 拉取失败时，判断是不是「这个服务商压根没有模型列表接口」 */
@@ -4758,7 +4855,15 @@ function bindEvents() {
     const provider = providerById(el.s.imageProvider.value);
     fillModelSelect(el.s.imageModel, el.s.imageProvider.value, '', '（先在左边选一个服务商）', false);
     preferImageModel(provider);
+    // 换了模型，尺寸的可选项也要跟着换
+    fillImageSizeOptions(el.s.imageModel.value, el.s.imageSize.value);
   });
+
+  // 换生图模型 → 尺寸可选项跟着换（不同模型支持的尺寸不一样）
+  el.s.imageModel.addEventListener('change', () => {
+    fillImageSizeOptions(el.s.imageModel.value, el.s.imageSize.value);
+  });
+
   el.s.embeddingProvider.addEventListener('change', () => {
     fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, '', '（先在上面选一个服务商）', false);
   });

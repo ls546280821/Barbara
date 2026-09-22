@@ -1951,18 +1951,29 @@ function registerIpc() {
     const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (endpoint.apiKey) headers.Authorization = `Bearer ${endpoint.apiKey}`;
 
+    // 少数服务商（智谱）的图片接口不认 OpenAI 的 response_format / n，
+    // 反而要求 quality。参数给错了它只回一句「API 调用参数有误」（错误码 1210），
+    // 所以这里按服务商裁剪参数，别把不认识的字段一起发过去。
+    const isZhipuImage = /bigmodel\.cn/i.test(String(endpoint.baseUrl || ''));
+    const imageBody = {
+      model: endpoint.model,
+      prompt,
+      size: String(request.size || settings.imageSize || '1024x1024')
+    };
+    if (isZhipuImage) {
+      // glm-image 只支持 hd；cogview 系列默认 standard，不传就是默认值
+      if (/^glm-image$/i.test(String(endpoint.model || ''))) imageBody.quality = 'hd';
+    } else {
+      imageBody.n = 1;
+      imageBody.response_format = 'b64_json';
+    }
+
     try {
       const json = await requestJson({
         url: imagesUrl(endpoint.baseUrl),
         method: 'POST',
         headers,
-        body: {
-          model: endpoint.model,
-          prompt,
-          n: 1,
-          size: String(request.size || settings.imageSize || '1024x1024'),
-          response_format: 'b64_json'
-        },
+        body: imageBody,
         // 生图比聊天慢得多，给两分钟
         timeoutMs: 120000
       });
