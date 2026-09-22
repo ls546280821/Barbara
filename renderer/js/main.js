@@ -3546,29 +3546,45 @@ async function stopGenerating() {
  *     （换了服务商、或者列表被人删过，都会出现这种情况）
  *   · 用户主动换服务商时 false —— 老服务商的模型名在新服务商这儿没有意义，直接选第一个
  */
-function fillModelSelect(select, providerId, current, emptyHint, keepMissing = true) {
+/**
+ * 给模型下拉填选项。
+ *
+ * catalogModels：可选，把内置目录里的模型也并进来（标注「内置」）。
+ * 生图那一组用得上 —— 服务商的模型列表里通常只有文本模型，
+ * 不并进来的话用户根本选不到 glm-image 这种生图模型。
+ * 只在界面上多给几个选项，不会去改用户的服务商配置。
+ */
+function fillModelSelect(select, providerId, current, emptyHint, keepMissing = true, catalogModels = null) {
   clear(select);
 
   const provider = providerById(providerId);
   const models = provider && Array.isArray(provider.models) ? provider.models.filter(Boolean) : [];
+  const extra = (Array.isArray(catalogModels) ? catalogModels : []).filter((m) => m && !models.includes(m));
+  const all = [...models, ...extra];
   const value = String(current || '').trim();
 
-  if (!models.length) {
+  if (!all.length) {
     select.appendChild(h('option', { value: '', text: emptyHint }));
     select.disabled = true;
     return;
   }
 
   select.disabled = false;
-  if (keepMissing && value && !models.includes(value)) {
+
+  // 存过的值不在列表里（既不在服务商配置、也不在目录）也保留，别让用户的选择凭空消失
+  if (keepMissing && value && !all.includes(value)) {
     select.appendChild(h('option', { value, text: `${value}（不在列表里）` }));
   }
+
   for (const model of models) {
     select.appendChild(h('option', { value: model, text: model }));
   }
+  for (const model of extra) {
+    select.appendChild(h('option', { value: model, text: `${model}（内置）` }));
+  }
 
   // 有保存过的就用它；没有就挑第一个，别让下拉是空的
-  select.value = value || models[0];
+  select.value = value || all[0];
 }
 
 function fillSettingsForm(settings) {
@@ -3595,7 +3611,16 @@ function fillSettingsForm(settings) {
     ? settings.imageProviderId
     : '';
   el.s.imageModel.value = settings.imageModel || '';
-  fillModelSelect(el.s.imageModel, el.s.imageProvider.value, settings.imageModel, '（先在左边选一个服务商）');
+  // 生图模型下拉要并上内置目录 —— 服务商的模型列表里通常只有文本模型，
+  // 不并的话用户根本选不到 glm-image 这种生图模型
+  fillModelSelect(
+    el.s.imageModel,
+    el.s.imageProvider.value,
+    settings.imageModel,
+    '（先在左边选一个服务商）',
+    true,
+    imageCatalogModels(el.s.imageProvider.value)
+  );
   // 尺寸的可选项跟着生图模型走，且会纠正该模型不支持的旧值
   fillImageSizeOptions(el.s.imageModel.value, settings.imageSize);
 
@@ -3890,6 +3915,14 @@ function catalogForBaseUrl(baseUrl) {
   return MODEL_CATALOG.find((c) => c.match.test(url)) || null;
 }
 
+/** 某个服务商的内置生图模型（用来并进生图模型下拉） */
+function imageCatalogModels(providerId) {
+  const provider = providerById(providerId);
+  if (!provider) return [];
+  const catalog = catalogForBaseUrl(provider.baseUrl);
+  return catalog && Array.isArray(catalog.imageModels) ? catalog.imageModels : [];
+}
+
 /**
  * 各生图模型支持的图片尺寸。
  *
@@ -3950,41 +3983,40 @@ function isValidImageSize(model, size) {
  *
  * 坑：provider.models 里通常全是文本模型，生图那一组下拉如果直接沿用，
  * 就会把 glm-5.3 这种文本模型发给 /images/generations，接口报 404。
- * 所以有已知生图模型时，主动切过去并说明原因。
+ * 所以有内置生图目录时，主动切过去并说明原因；
+ * 用户自己指定了生图模型（模型名看着像生图模型）就不抢。
  */
 function preferImageModel(provider) {
   if (!provider) return;
 
-  const catalog = catalogForBaseUrl(provider.baseUrl);
-  const imageModels = catalog && Array.isArray(catalog.imageModels) ? catalog.imageModels : [];
+  const imageModels = imageCatalogModels(provider.id);
+  if (!imageModels.length) return;
 
   const available = Array.isArray(provider.models) ? provider.models.filter(Boolean) : [];
   const current = String(el.s.imageModel.value || '').trim();
 
-  // 当前选的已经是这家已知的生图模型 —— 不用动
+  // 当前已经是这家已知的生图模型 —— 不用动
   if (current && imageModels.includes(current)) return;
-  // 用户自己在模型列表里放了生图模型，且已经选中它 —— 尊重用户
+  // 用户自己在模型列表里放了生图模型并选中了它 —— 尊重用户
   if (current && current !== available[0] && /image|cogview|dall-e|wanx|flux|sd|stable/i.test(current)) return;
 
-  const target = imageModels.length ? imageModels[0] : available[0];
-  if (!target || target === current) return;
+  const target = imageModels[0];
+  if (target === current) return;
 
   const option = Array.from(el.s.imageModel.options || []).find((o) => o.value === target);
   if (option) {
     el.s.imageModel.value = target;
   } else {
-    el.s.imageModel.appendChild(h('option', { value: target, text: target }));
+    el.s.imageModel.appendChild(h('option', { value: target, text: `${target}（内置）` }));
     el.s.imageModel.value = target;
   }
 
-  if (imageModels.length) {
-    showToast(
-      `这家服务商的生图模型是 ${imageModels.join(' / ')}，` +
-        `已从「${current || '文本模型'}」切到「${target}」——` +
-        '文本模型不能用来生图，选错会报 404',
-      'ok'
-    );
-  }
+  showToast(
+    `这家服务商的生图模型是 ${imageModels.join(' / ')}，` +
+      `已从「${current || '文本模型'}」切到「${target}」——` +
+      '文本模型不能用来生图，选错会报 404',
+    'ok'
+  );
 }
 
 /**
@@ -4098,7 +4130,14 @@ async function fetchModels() {
 
     // 模型列表变了，生图 / 向量那两组下拉也要跟着刷新 ——
     // 刚拉到的列表里可能正好有你要的画图模型
-    fillModelSelect(el.s.imageModel, el.s.imageProvider.value, el.s.imageModel.value, '（先在左边选一个服务商）');
+    fillModelSelect(
+      el.s.imageModel,
+      el.s.imageProvider.value,
+      el.s.imageModel.value,
+      '（先在左边选一个服务商）',
+      true,
+      imageCatalogModels(el.s.imageProvider.value)
+    );
     fillModelSelect(el.s.embeddingModel, el.s.embeddingProvider.value, el.s.embeddingModel.value, '（先在上面选一个服务商）');
 
     showToast(
@@ -4853,7 +4892,16 @@ function bindEvents() {
   // 换服务商 → 模型下拉跟着换（新服务商的列表里没有老模型，所以从第一个开始）
   el.s.imageProvider.addEventListener('change', () => {
     const provider = providerById(el.s.imageProvider.value);
-    fillModelSelect(el.s.imageModel, el.s.imageProvider.value, '', '（先在左边选一个服务商）', false);
+    // 并上内置生图模型：服务商的模型列表里往往只有文本模型，
+    // 不并的话用户在下拉里找不到 glm-image 这种能生图的模型
+    fillModelSelect(
+      el.s.imageModel,
+      el.s.imageProvider.value,
+      '',
+      '（先在左边选一个服务商）',
+      false,
+      imageCatalogModels(el.s.imageProvider.value)
+    );
     preferImageModel(provider);
     // 换了模型，尺寸的可选项也要跟着换
     fillImageSizeOptions(el.s.imageModel.value, el.s.imageSize.value);

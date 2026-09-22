@@ -708,6 +708,12 @@ await scenario('给剧情配图（生图）', async () => {
     byId('s-image-model').tagName === 'SELECT' && imgModelOptions.length === 1 && imgModelOptions[0] === 'img-model-x',
     `${byId('s-image-model').tagName} ${JSON.stringify(imgModelOptions)}`
   );
+
+  // 注意：「生图模型下拉并入内置目录」这条不在这里测。
+  // 它需要服务商的 baseUrl 命中内置目录，而这个冒烟环境里的服务商都是
+  // 127.0.0.1 的假地址、命不中；临时加一个服务商又会牵动
+  // settings:save 的合并与下拉重填，测起来很脆。
+  // 这条逻辑由 tools 外的纯函数测试覆盖（fillModelSelect 是纯函数，用假 DOM 跑）。
   setValue('#s-image-model', 'img-model-x');
   setValue('#s-image-size', '1024x1024');
   await sleep(200);
