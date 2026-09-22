@@ -833,12 +833,88 @@ body {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  /* 左边多留一点，输入的文字不会贴着边框 */
-  padding: 8px 8px 8px 15px;
+  /* 左边只留一点：加图按钮自己占位置，文字不会贴边 */
+  padding: 8px;
   transition: border-color 0.15s;
 }
 
 .composer-box:focus-within { border-color: var(--accent); }
+
+/* 拖图片进来时整条输入框高亮，告诉用户「往这儿放」 */
+.composer.drop-target .composer-box {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* 加图按钮：和输入框底部对齐，别抢视线 */
+.attach-btn {
+  flex: 0 0 auto;
+  margin-bottom: 2px;
+  color: var(--text-faint);
+}
+
+.attach-btn:hover { color: var(--accent); }
+
+/* 待发送的图片：输入框上方一条缩略图 */
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 860px;
+  margin: 0 auto 8px;
+}
+
+.attach-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.attach-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attach-del {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(23, 37, 66, 0.62);
+  color: #fff;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.attach-del:hover { background: var(--danger); }
+
+/* 气泡里的图（用户发的 / AI 生成的） */
+.bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.bubble-image {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  display: block;
+}
 
 #input {
   flex: 1 1 auto;

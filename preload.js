@@ -49,7 +49,9 @@ contextBridge.exposeInMainWorld('barbara', {
   previewWorldbook: (payload) => ipcRenderer.invoke('worldbooks:preview', payload),
 
   // --- 图片 ---
-  pickImage: () => ipcRenderer.invoke('images:pick'),
+  // --- 图片 ---
+  pickImage: (options) => ipcRenderer.invoke('images:pick', options),
+  openImage: (dataUrl) => ipcRenderer.invoke('images:open', dataUrl),
 
   // --- 对话 ---
   sendChat: (payload) => ipcRenderer.invoke('chat:send', payload),

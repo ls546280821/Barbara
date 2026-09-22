@@ -18,6 +18,8 @@ export const el = {
   usageText: $('usage-text'),
   btnNew: $('btn-new'),
   btnSend: $('btn-send'),
+  btnAttach: $('btn-attach'),
+  attachStrip: $('attach-strip'),
   btnStop: $('btn-stop'),
   btnClear: $('btn-clear'),
   btnCopyAll: $('btn-copy-all'),

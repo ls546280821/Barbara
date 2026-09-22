@@ -595,7 +595,61 @@ await scenario('消息：重新生成候选', async () => {
 });
 
 // ---------------------------------------------------------------------------
-//  场景 13：对话窗口外观（字号 / 加粗颜色 / 背景图）
+//  场景 13：给 AI 看图（加图 / 粘贴 / 发出去）
+// ---------------------------------------------------------------------------
+await scenario('给 AI 看图', async () => {
+  click('#convo-list .convo-item');
+  await waitFor('切回聊天视图', () => shown('#view-chat'));
+  await sleep(200);
+
+  check('输入框旁边有加图按钮', !!byId('btn-attach'));
+
+  // --- 点按钮加一张（假后端返回的是一张真的 1×1 PNG）---
+  click('#btn-attach');
+  await waitFor('缩略图出现', () => $$('#attach-strip .attach-item').length === 1, 8000);
+  check('缩略图出来了', $$('#attach-strip .attach-item').length === 1, String($$('#attach-strip .attach-item').length));
+  check('待发区显示出来了', shown('#attach-strip'));
+  check('缩略图里真的有图', !!$('#attach-strip .attach-item img'));
+
+  // --- × 能撤掉 ---
+  click($('#attach-strip .attach-del'));
+  await sleep(250);
+  check('点 × 能撤掉', $$('#attach-strip .attach-item').length === 0, String($$('#attach-strip .attach-item').length));
+  check('撤掉后整条收起来', !shown('#attach-strip'));
+
+  // --- 粘贴一张（模拟 Ctrl+V 一张截图）---
+  await new Promise((resolve) => {
+    const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    const file = new File([bytes], 'shot.png', { type: 'image/png' });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    byId('input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }));
+    setTimeout(resolve, 700);
+  });
+  check('粘贴也能加图', $$('#attach-strip .attach-item').length === 1, String($$('#attach-strip .attach-item').length));
+
+  // --- 连文字一起发出去 ---
+  setValue('#input', '这是我拍的照片，你看看');
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 10000);
+  await sleep(400);
+
+  check('发出去之后待发列表清空', $$('#attach-strip .attach-item').length === 0, String($$('#attach-strip .attach-item').length));
+  check('气泡里显示了图片', !!$('#messages .bubble-image'), '没找到 .bubble-image');
+  check('文字也还在', $('#messages').textContent.includes('这是我拍的照片'));
+
+  // --- 只带图不打字也要能发 ---
+  click('#btn-attach');
+  await waitFor('又来一张', () => $$('#attach-strip .attach-item').length === 1, 8000);
+  click('#btn-send');
+  await waitFor('回复完成', () => byId('btn-send').disabled === false, 10000);
+  await sleep(300);
+  check('只发图不写字也能发出去', $('#messages').textContent.includes('（图片）') || $$('#messages .bubble-image').length >= 2, String($$('#messages .bubble-image').length));
+});
+
+// ---------------------------------------------------------------------------
+//  场景 14：对话窗口外观（字号 / 加粗颜色 / 背景图）
 // ---------------------------------------------------------------------------
 await scenario('对话窗口外观', async () => {
   click('#btn-appearance');

@@ -688,7 +688,12 @@ function messageNode(message, index, character, labels) {
   } else {
     content.innerHTML = renderMarkdown(message.content);
   }
-  bubble.appendChild(content);
+
+  // 图片放在文字上面 —— 先看图再看说话，跟聊天软件的习惯一致
+  const imageBlock = buildMessageImages(message);
+  if (imageBlock) bubble.appendChild(imageBlock);
+  // 只带图没打字的，就不要留一个空段落了
+  if (String(message.content || '').trim() || !imageBlock) bubble.appendChild(content);
 
   body.appendChild(role);
   body.appendChild(bubble);
@@ -2633,6 +2638,162 @@ async function exportConversation() {
 }
 
 // ---------------------------------------------------------------------------
+//  给 AI 看图
+//
+//  图片跟着**用户消息**走：message.images = [dataURL, ...]。
+//  发请求时把这条消息的 content 从字符串换成多模态数组
+//   （[{type:'text'},{type:'image_url'}...]），这是 OpenAI 那套的通用写法。
+//
+//  模型得**自己支持视觉**才行 —— 这不需要另外接一个模型，但文本模型收到图会报错。
+//  所以这里不做拦截（拦了用户会莫名其妙找不到按钮），而是失败了再给一句明确提示。
+// ---------------------------------------------------------------------------
+
+// 一张图最长边压到多少再发。视觉模型内部一般也就缩到这个量级，
+// 传原图只是白烧 token 和流量
+const CHAT_IMAGE_MAX_EDGE = 1024;
+// 单张压完之后的体积上限（base64 字符数）。超了就再压一档
+const CHAT_IMAGE_MAX_CHARS = 1600000;
+// 一条消息最多带几张
+const CHAT_IMAGE_MAX_COUNT = 6;
+
+// 输入框里待发送的图片
+let pendingImages = [];
+
+/**
+ * 聊天图片压缩：等比缩到最长边 1024，再转 webp。
+ * 和背景图那套一样只缩不裁（裁了内容就变了）。
+ */
+function shrinkChatImage(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, CHAT_IMAGE_MAX_EDGE / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+
+        // 先按 0.82 压；还是太大就降到 0.6 —— 宁可糊一点也别把请求撑爆
+        let out = canvas.toDataURL('image/webp', 0.82);
+        if (!out.startsWith('data:image/')) {
+          out = canvas.toDataURL('image/jpeg', 0.85);
+        }
+        if (out.length > CHAT_IMAGE_MAX_CHARS && out.startsWith('data:image/webp')) {
+          out = canvas.toDataURL('image/webp', 0.6);
+        }
+        resolve(out.startsWith('data:image/') ? out : dataUrl);
+      } catch (err) {
+        resolve(dataUrl);
+      }
+    };
+
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/** 收下一张图：压缩 → 进待发列表 → 重画 */
+async function addPendingImage(dataUrl) {
+  if (!dataUrl) return;
+
+  if (pendingImages.length >= CHAT_IMAGE_MAX_COUNT) {
+    showToast(`一条消息最多带 ${CHAT_IMAGE_MAX_COUNT} 张图`, 'error');
+    return;
+  }
+
+  const shrunk = await shrinkChatImage(dataUrl);
+  pendingImages.push(shrunk);
+  renderAttachStrip();
+}
+
+/** 点「加图」：走主进程的文件选择框 */
+async function pickChatImages() {
+  let result;
+  try {
+    result = await api.pickImage({ title: '选择要发给 AI 的图片' });
+  } catch (err) {
+    showToast((err && err.message) || '选择图片失败', 'error');
+    return;
+  }
+
+  if (!result || result.canceled) return;
+  if (!result.dataUrl) {
+    showToast(result.error || '这张图用不了', 'error');
+    return;
+  }
+  await addPendingImage(result.dataUrl);
+}
+
+/** 把剪贴板 / 拖进来的一批文件变成图片收下 */
+async function addImageFiles(files) {
+  const images = Array.from(files || []).filter((f) => f && String(f.type || '').startsWith('image/'));
+  if (!images.length) return false;
+
+  for (const file of images) {
+    const dataUrl = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    });
+    await addPendingImage(dataUrl);
+  }
+  return true;
+}
+
+function renderAttachStrip() {
+  clear(el.attachStrip);
+  el.attachStrip.classList.toggle('hidden', !pendingImages.length);
+
+  pendingImages.forEach((src, index) => {
+    const thumb = h('div', { class: 'attach-item' }, h('img', { src, alt: '' }));
+    thumb.appendChild(
+      button({
+        class: 'attach-del',
+        text: '×',
+        title: '不发了',
+        ariaLabel: `移除第 ${index + 1} 张图`,
+        onClick: () => {
+          pendingImages.splice(index, 1);
+          renderAttachStrip();
+        }
+      })
+    );
+    el.attachStrip.appendChild(thumb);
+  });
+}
+
+/** 消息气泡里的图（用户发的 + 以后 AI 生成的都走这里） */
+function messageImages(message) {
+  return Array.isArray(message.images) ? message.images.filter((s) => typeof s === 'string' && s) : [];
+}
+
+function buildMessageImages(message) {
+  const images = messageImages(message);
+  if (!images.length) return null;
+
+  const wrap = h('div', { class: 'bubble-images' });
+  for (const src of images) {
+    // 点开看大图：直接 window.open 会被 CSP 拦，交给主进程弹一个窗口
+    wrap.appendChild(
+      h('img', {
+        class: 'bubble-image',
+        src,
+        alt: '图片',
+        title: '点开看大图',
+        onclick: () => api.openImage(src).catch(() => showToast('打不开这张图', 'error'))
+      })
+    );
+  }
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -2660,8 +2821,11 @@ function buildApiMessages(convo, worldbookSection) {
 
   // 注意：调用时对话末尾通常刚 push 了一条空的 assistant 占位消息（用来填空），
   // 必须把它过滤掉，否则会发给接口一条 content 为空的消息，严格的接口会直接报 400。
+  // 但**只带图不打字**的用户消息要留下 —— 它没有文字却是有内容的。
   const history = convo.messages.filter(
-    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+    (m) =>
+      (m.role === 'user' || m.role === 'assistant') &&
+      (String(m.content || '').trim() || messageImages(m).length)
   );
 
   const turns = Math.max(1, Number(settings.maxTurns) || CONFIG.MAX_TURNS);
@@ -2763,11 +2927,22 @@ function buildApiMessages(convo, worldbookSection) {
   // 用本会话的已知字段名来剥：正文里提到同名字样不会被误删。
   const panelFields = convoPanelFields(convo);
   for (const m of recent) {
-    const content = applyMacros(m.content, character, me);
-    messages.push({
-      role: m.role,
-      content: m.role === 'assistant' ? stripPanelLines(content, panelFields) : content
-    });
+    const raw = applyMacros(m.content, character, me);
+    const text = m.role === 'assistant' ? stripPanelLines(raw, panelFields) : raw;
+    const images = messageImages(m);
+
+    // 带图的用户消息要发成多模态数组 —— 这是 OpenAI 那套的通用写法，
+    // 别的家（Claude / Gemini 的兼容层）一般也认。
+    if (images.length && m.role === 'user') {
+      const parts = [];
+      // 有的接口不接受空 text 段，所以只有真有字才加
+      if (String(text).trim()) parts.push({ type: 'text', text });
+      for (const url of images) parts.push({ type: 'image_url', image_url: { url } });
+      messages.push({ role: 'user', content: parts });
+      continue;
+    }
+
+    messages.push({ role: m.role, content: text });
   }
 
   // ---- 5. 面板状态：紧贴对话历史之后，权重很高 ----
@@ -2795,7 +2970,9 @@ function setStreaming(on) {
 
 async function sendMessage(text) {
   const content = String(text || '').trim();
-  if (!content) return;
+  // 只带图不写字也算一条消息 —— 问「这是什么」不一定非要打字
+  const images = pendingImages.slice();
+  if (!content && !images.length) return;
 
   if (state.streaming) {
     showToast('正在生成中，请稍候或先停止');
@@ -2819,10 +2996,17 @@ async function sendMessage(text) {
   }
 
   if (convo.messages.length === 0) {
-    convo.title = content.slice(0, 24) || '新对话';
+    convo.title = content.slice(0, 24) || (images.length ? '（图片）' : '新对话');
   }
 
-  convo.messages.push({ role: 'user', content, at: now() });
+  const message = { role: 'user', content, at: now() };
+  if (images.length) message.images = images;
+  convo.messages.push(message);
+
+  // 图发出去了就清掉，免得下一条又带上
+  pendingImages = [];
+  renderAttachStrip();
+
   convo.updatedAt = now();
   state.usage = null;
   renderAll({ forceScroll: true });
@@ -4118,6 +4302,39 @@ function bindEvents() {
     autoGrowInput();
     sendMessage(text);
   });
+
+  // --- 给 AI 看图 ---
+  el.btnAttach.addEventListener('click', pickChatImages);
+
+  // 粘贴：截图之后 Ctrl+V 直接贴进来，比存文件再选快得多
+  el.input.addEventListener('paste', (event) => {
+    const files = event.clipboardData && event.clipboardData.files;
+    if (!files || !files.length) return;
+    event.preventDefault();
+    addImageFiles(files).then((took) => {
+      if (took) showToast('图片已贴在输入框上方', 'ok');
+    });
+  });
+
+  // 拖拽：把图片拖到输入区就能加
+  const composer = el.input.closest('.composer');
+  if (composer) {
+    composer.addEventListener('dragover', (event) => {
+      if (!event.dataTransfer || !Array.from(event.dataTransfer.types || []).includes('Files')) return;
+      event.preventDefault();
+      composer.classList.add('drop-target');
+    });
+    composer.addEventListener('dragleave', () => composer.classList.remove('drop-target'));
+    composer.addEventListener('drop', (event) => {
+      composer.classList.remove('drop-target');
+      const files = event.dataTransfer && event.dataTransfer.files;
+      if (!files || !files.length) return;
+      event.preventDefault();
+      addImageFiles(files).then((took) => {
+        if (took) showToast('图片已加进待发列表', 'ok');
+      });
+    });
+  }
 
   el.btnStop.addEventListener('click', stopGenerating);
   el.btnClear.addEventListener('click', clearConvo);

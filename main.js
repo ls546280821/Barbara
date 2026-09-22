@@ -1512,9 +1512,10 @@ function registerIpc() {
    * 页面被 CSP 挡着读不了文件，所以由主进程弹系统文件框、读文件、
    * 转成 dataURL 再交给界面 —— CSP 里 img-src 已经放行了 data:。
    */
-  ipcMain.handle('images:pick', async () => {
+  ipcMain.handle('images:pick', async (_event, options) => {
+    const opts = options || {};
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择头像图片',
+      title: opts.title || '选择图片',
       buttonLabel: '使用这张',
       properties: ['openFile'],
       filters: [{ name: '图片', extensions: Object.keys(IMAGE_MIME).map((e) => e.slice(1)) }]
@@ -1644,6 +1645,42 @@ function registerIpc() {
     }
 
     return { canceled: false, filePath: result.filePath };
+  });
+
+  /**
+   * 点开看大图。渲染层的 CSP 是 img-src 'self' data:，直接 window.open 会被拦，
+   * 所以在这里落一个临时文件、开一个只显示这张图的窗口，关掉时把文件删了。
+   */
+  ipcMain.handle('images:open', (_event, dataUrl) => {
+    const match = /^data:image\/(png|jpeg|jpg|webp|gif);base64,(.+)$/.exec(String(dataUrl || ''));
+    if (!match) return false;
+
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const file = path.join(app.getPath('temp'), `barbara-view-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+
+    try {
+      fs.writeFileSync(file, Buffer.from(match[2], 'base64'));
+    } catch (err) {
+      return false;
+    }
+
+    const viewer = new BrowserWindow({
+      width: 960,
+      height: 720,
+      title: '图片',
+      autoHideMenuBar: true,
+      backgroundColor: '#1b1f27'
+    });
+    viewer.loadFile(file);
+    viewer.once('closed', () => {
+      try {
+        fs.unlinkSync(file);
+      } catch (err) {
+        /* 删不掉就算了，系统临时目录迟早会清 */
+      }
+    });
+
+    return true;
   });
 
   ipcMain.handle('util:openPath', async (_event, which) => {
