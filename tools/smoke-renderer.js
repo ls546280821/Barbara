@@ -1551,4 +1551,75 @@ await scenario('角色：绑定自带的世界书', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+//  角色自带的世界书：绑上之后顶部要能看出来生效
+//
+//  放在最后：这个场景会通过「聊天」入口新建一条会话，
+//  建完当前会话就变了 —— 排在中间会把后面场景的起点搅乱
+//  （第一次放在「重新生成候选」前面，直接把那个场景弄挂了）。
+// ---------------------------------------------------------------------------
+await scenario('角色自带的世界书：顶部能看出生效', async () => {
+  // 造一张绑了世界书的角色，存档
+  click('#btn-chars');
+  await waitFor('切到角色库页面', () => shown('#view-chars'));
+  click('#btn-new-char');
+  await waitFor('角色编辑器打开', () => shown('#chars-modal'));
+  const NAME = '顶栏生效测试';
+  setValue('#c-name', NAME);
+  await sleep(80);
+
+  click('#c-wb-add-btn');
+  await waitFor('选择浮层出现', () => !!$('.cwb-picker'));
+  const target = $$('.cwb-picker .cwb-picker-row').find((o) =>
+    String(o.textContent || '').includes('冒烟测试世界')
+  );
+  click(target);
+  await waitFor('清单里出现这本', () => $$('#c-wb-list .cwb-row').length === 1);
+  click('#btn-save-char');
+  await waitFor('保存完成', () => byId('chars-title').textContent === '编辑角色', 8000);
+  await sleep(200);
+
+  // 关掉编辑器，回聊天视图（关编辑器不会自动切页，得点会话）
+  click('#btn-close-chars');
+  await sleep(200);
+  click('#convo-list .convo-item');
+  await waitFor('回聊天视图', () => shown('#view-chat'));
+  await sleep(250);
+
+  // 头部不该无中生有：还没绑角色的会话不显示「角色自带」
+  const beforeBind = String(byId('convo-meta').textContent || '');
+  check('绑之前头部没有「角色自带」', !beforeBind.includes('（角色自带）'), beforeBind);
+
+  const chars = (await savedCharacters()).filter((c) => c.name === NAME);
+  const targetChar = chars[0];
+  check('角色建好并且绑了世界书',
+    !!targetChar && Array.isArray(targetChar.worldbookIds) && targetChar.worldbookIds.length === 1,
+    JSON.stringify(targetChar && targetChar.worldbookIds));
+
+  if (targetChar) {
+    // 用角色卡上的「聊天」入口绑定角色
+    // （顶部那个角色下拉在重构里已经去掉了，别再用它）
+    click('#btn-chars');
+    await waitFor('切到角色库页面', () => shown('#view-chars'));
+    await sleep(300);
+    const card = $$('.char-card').find((c) => String(c.textContent || '').includes(NAME));
+    if (!card) {
+      check('角色卡出现在列表里', false, JSON.stringify($$('.char-card').map((c) => c.textContent.trim().slice(0, 20))));
+    } else {
+      const chatBtn = buttonByText(card, '聊天');
+      if (!chatBtn) {
+        check('角色卡上有「聊天」按钮', false, JSON.stringify(Array.from(card.querySelectorAll('button')).map((b) => b.textContent.trim())));
+      } else {
+        click(chatBtn);
+        await waitFor('回到聊天视图', () => shown('#view-chat'), 8000);
+        await sleep(500);
+
+        const meta = String(byId('convo-meta').textContent || '');
+        check('绑上角色后头部显示它自带的世界书', meta.includes('冒烟测试世界'), meta);
+        check('并且标明了是「角色自带」', meta.includes('（角色自带）'), meta);
+      }
+    }
+  }
+});
+
 return { results, notes, hoverProbe };

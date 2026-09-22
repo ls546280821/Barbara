@@ -443,12 +443,28 @@ function renderHeader() {
     el.convoMeta.textContent = `${prefix}${endpoint.provider.name} · ${endpoint.model || '未选模型'}`;
   }
 
-  // 进了世界的会话：把世界名写在顶部，一眼知道自己在哪个世界
-  const convoBooks = convoWorldbookIds(convo)
-    .map((id) => worldbookById(id))
-    .filter(Boolean);
+  // 世界书：把「当前实际生效的是哪些」写清楚，并标出来源。
+  // 以前这里只显示会话绑的书，角色自带的那本完全不可见 ——
+  // 用户根本没法判断它到底有没有生效，只能靠猜。
+  const convoBookIds = convoWorldbookIds(convo);
+  const convoBooks = convoBookIds.map((id) => worldbookById(id)).filter(Boolean);
+  const charBookIds = character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
+  const charBooks = charBookIds.map((id) => worldbookById(id)).filter(Boolean);
+
   if (convoBooks.length) {
     el.convoMeta.textContent += ` · 世界：${convoBooks.map((b) => b.name).join('、')}`;
+    // 会话绑了世界时，角色的书按设计让位 —— 但要说出来，不能悄悄不生效
+    if (charBooks.length) {
+      el.convoMeta.textContent +=
+        character.worldbookEnabled === false
+          ? '（角色自带的书已关掉）'
+          : '（角色自带的书这次不生效：世界优先）';
+    }
+  } else if (charBooks.length) {
+    el.convoMeta.textContent +=
+      character.worldbookEnabled === false
+        ? ` · 自带世界书：${charBooks.map((b) => b.name).join('、')}（已关掉）`
+        : ` · 世界：${charBooks.map((b) => b.name).join('、')}（角色自带）`;
   }
 
   // 视角：只在偏离默认（标准 + 一步一步 + 非 GM）时提示，平时不占位置
@@ -915,8 +931,9 @@ function createConvo(activate) {
     updatedAt: now(),
     messages: [],
     characterId: null,
-    // 会话自己绑的世界书。这是世界书词条唯一的生效途径 ——
-    // 角色库里的角色单独聊天时不会注入任何世界书。
+    // 会话自己绑的世界书（「进入世界」走这里）。
+    // 另有「角色自带的世界书」——那条路走 character.worldbookIds，
+    // 两者由 effectiveWorldbookIds 决定用谁：会话绑了就只用会话的。
     worldbookIds: [],
     // 状态面板：fields 是出现过的字段顺序，panel 是当前值。
     // 世界模型开局通常是空的，第一条带面板的回复会自动填上。
