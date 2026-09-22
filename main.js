@@ -670,7 +670,9 @@ function characterFromCard(card, avatar, source, fallbackName) {
       age: ext.age,
       gender: ext.gender,
       race: ext.race,
-      attributes: ext.attributes
+      attributes: ext.attributes,
+      // 自带世界书的开关也跟着一起回来。缺省 true，所以没这个字段的卡不受影响。
+      worldbookEnabled: typeof ext.worldbookEnabled === 'boolean' ? ext.worldbookEnabled : true
     },
     source
   );
@@ -1697,11 +1699,14 @@ function registerIpc() {
           continue;
         }
 
-        // 内嵌世界书：给它一个正式 id 存进世界书库。
-        // 不再自动跟角色绑定 —— 角色是独立个体，要不要把角色放进这本书由用户决定。
+        // 内嵌世界书：给它一个正式 id 存进世界书库，并**自动绑到这个角色**上。
+        // 一张卡自带的书就是给这张卡用的，导入即可用；
+        // 不想要的话，在角色编辑器里关掉开关或者解绑就行。
         if (character.worldbook) {
           const book = { ...character.worldbook, id: newWorldbookId() };
           worldbooks.push(book);
+          character.worldbookIds = [book.id];
+          character.worldbookEnabled = true;
         }
         delete character.worldbook;
         characters.push(character);

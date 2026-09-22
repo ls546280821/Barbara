@@ -20,6 +20,27 @@ const MAX_AVATAR_CHARS = 18000000; // ≈ 13MB 的 PNG，留足余量
 // 角色「属性」的条数上限，和渲染层状态面板的 MAX_PANEL_FIELDS 保持一致
 const MAX_ATTRIBUTES = 120;
 
+// 一个角色最多绑几本世界书。导入角色卡时内嵌的那本会自动绑上，
+// 之后用户还能手工加，所以给一个够用但不会失控的上限。
+const MAX_CHARACTER_WORLDBOOKS = 50;
+
+/**
+ * 世界书 id 列表归一化。
+ * 去重、去空、限制条数 —— 和渲染层的 normalizeIdList 一个思路。
+ */
+function normalizeWorldbookIds(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (!id || out.includes(id)) continue;
+    out.push(id);
+    if (out.length >= MAX_CHARACTER_WORLDBOOKS) break;
+  }
+  return out;
+}
+
 function newCharacterId() {
   return `c${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
 }
@@ -84,10 +105,24 @@ function normalizeCharacter(raw, source) {
       : [],
     // 状态面板的字段模板。少了这一行，界面上填的属性一存盘就没了。
     attributes: normalizeAttributes(r.attributes),
+    // 角色自带的世界书。导入带 character_book 的角色卡时自动绑上，
+    // 之后用户也能自己加/删。
+    worldbookIds: normalizeWorldbookIds(r.worldbookIds),
+    // 开关：关掉后这张角色在哪儿都不带入自带的那些书。
+    // 缺省视为开启（导入即可用）；只有显式 false 才算关。
+    worldbookEnabled: r.worldbookEnabled !== false,
     source: ['png', 'json', 'manual'].includes(r.source) ? r.source : source || 'manual',
     createdAt: Number(r.createdAt) || Date.now(),
     updatedAt: Number(r.updatedAt) || Date.now()
   };
 }
 
-module.exports = { normalizeCharacter, normalizeAttributes, normalizeGender, newCharacterId, MAX_AVATAR_CHARS };
+module.exports = {
+  normalizeCharacter,
+  normalizeAttributes,
+  normalizeGender,
+  normalizeWorldbookIds,
+  newCharacterId,
+  MAX_AVATAR_CHARS,
+  MAX_CHARACTER_WORLDBOOKS
+};

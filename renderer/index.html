@@ -606,6 +606,20 @@
               </span>
             </div>
 
+            <!-- 角色自带的世界书：导入带 character_book 的角色卡时会有。
+                 开关关掉后，这张角色无论单独聊天、还是被绑进某个世界当角色，
+                 都不会带入它自己的世界书。 -->
+            <div id="c-worldbook-box" class="char-worldbook-box hidden">
+              <label class="check">
+                <input id="c-wb-enabled" type="checkbox" checked />
+                <span class="check-text">
+                  <span class="check-title">启用角色自带的世界书</span>
+                  <span class="check-desc" id="c-wb-desc"></span>
+                </span>
+              </label>
+              <p class="field-help" id="c-wb-hint"></p>
+            </div>
+
             <details class="char-advanced">
               <summary>高级选项（可以不管）</summary>
 

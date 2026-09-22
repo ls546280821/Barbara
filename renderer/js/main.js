@@ -162,10 +162,30 @@ function recursiveDepthSetting() {
   return Number.isFinite(value) && value >= 0 && value <= 5 ? Math.floor(value) : 3;
 }
 
+/**
+ * 这次请求实际要注入哪些世界书。
+ *
+ * 规则（会话优先，且不合并）：
+ *   · 会话绑了世界书（含「进入世界」）→ 只用会话的，角色自带的一律不带入。
+ *     一条会话只有一个世界观，不会出现两套设定互相打架。
+ *   · 会话没绑 → 才用角色自带的那几本（前提是这张卡的开关是开的）。
+ *
+ * 角色的开关（worldbookEnabled）关掉后，两种情况都不带入 ——
+ * 这样无论单独聊天、还是被绑进某个世界当角色，这张卡都是干净的。
+ */
+function effectiveWorldbookIds(convo) {
+  const convoIds = convoWorldbookIds(convo);
+  if (convoIds.length) return convoIds;
+
+  const character = characterForConvo(convo);
+  if (!character) return [];
+  if (character.worldbookEnabled === false) return [];
+
+  return Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
+}
+
 async function matchWorldbookSection(convo) {
-  // 世界书词条只由「会话绑定了哪本书」决定。
-  // 角色库里的角色单独聊天时不注入任何世界书，避免两个上下文串味。
-  const allIds = [...new Set(convoWorldbookIds(convo))];
+  const allIds = [...new Set(effectiveWorldbookIds(convo))];
   if (!allIds.length) return '';
 
   const history = convo.messages.filter(
@@ -2550,8 +2570,16 @@ function base64Utf8(text) {
  * 导出用的角色卡（酒馆 v2 规范）。
  * 自家多出来的字段（年龄/性别/种族/属性）塞进 extensions.barbara ——
  * 规范里 extensions 就是给各家放私有数据的，酒馆会原样保留，我们自己也能读回来。
+ *
+ * character_book：这张卡绑定的世界书（导入时自动绑上的那本）。
+ * 导出时一起带走，别人拿到这张卡就能直接用上它的背景设定 ——
+ * 酒馆也认这个字段，会当成「角色绑定的世界书」。
  */
 function characterCardPayload(character) {
+  // 只带第一本：v2 规范里 character_book 是单本（酒馆同样只导出主世界书）
+  const boundId = Array.isArray(character.worldbookIds) ? character.worldbookIds[0] : null;
+  const boundBook = boundId ? worldbookById(boundId) : null;
+
   return {
     spec: 'chara_card_v2',
     spec_version: '2.0',
@@ -2567,7 +2595,7 @@ function characterCardPayload(character) {
       post_history_instructions: character.postHistoryInstructions || '',
       tags: Array.isArray(character.tags) ? character.tags : [],
       alternate_greetings: [],
-      character_book: null,
+      character_book: boundBook ? worldbookPayload(boundBook) : null,
       creator: '',
       character_version: '',
       extensions: {
@@ -2575,7 +2603,9 @@ function characterCardPayload(character) {
           age: character.age || '',
           gender: character.gender || '',
           race: character.race || '',
-          attributes: characterAttrs(character)
+          attributes: characterAttrs(character),
+          // 开关也带上：别人导入后拿到的状态跟你这边一致
+          worldbookEnabled: character.worldbookEnabled !== false
         }
       }
     }
@@ -3056,7 +3086,8 @@ async function recallSection(convo) {
       providerId: settings.embeddingProviderId,
       model: settings.embeddingModel,
       convoId: convo.id,
-      worldbookIds: convoWorldbookIds(convo),
+      // 和关键词注入用同一套规则，否则两处会给出不一致的世界书范围
+      worldbookIds: effectiveWorldbookIds(convo),
       // 最近这些本来就会进上下文，别捞回来占位置
       recentCount: RAG_QUERY_TURNS * 2,
       query,
@@ -5230,6 +5261,12 @@ function bindEvents() {
 
   // 批量粘贴：一行一项，省得一条条手打
   el.c.btnAttrPaste.addEventListener('click', () => toggleAttrPaste());
+
+  // 自带世界书的开关：切一下就立刻刷新下面的说明，让人马上知道现在什么行为
+  el.c.wbEnabled.addEventListener('change', () => {
+    const character = editorCharacterById(editingCharacterId);
+    if (character) renderCharWorldbookBox({ ...character, worldbookEnabled: el.c.wbEnabled.checked });
+  });
   el.c.btnAttrPasteApply.addEventListener('click', applyAttrPaste);
 
   el.btnDelChar.addEventListener('click', deleteCharacter);
@@ -6190,6 +6227,9 @@ function fillCharForm(character) {
   charDraftAvatar = character.avatar || '';
   renderCharAvatar();
 
+  // 角色自带的世界书：没有就不显示这块，免得表单里多一个用不上的开关
+  renderCharWorldbookBox(character);
+
   // 属性：复制一份当草稿，保存时才写回角色卡
   charAttrs = characterAttrs(character);
   renderCharAttrs();
@@ -6197,6 +6237,30 @@ function fillCharForm(character) {
   el.charFootHint.textContent = charFootHintText(character);
 
   showCharForm(true);
+}
+
+/** 角色自带世界书那一块：没有绑书就整块藏起来 */
+function renderCharWorldbookBox(character) {
+  const ids = character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
+  const books = ids.map((id) => worldbookById(id)).filter(Boolean);
+
+  if (!books.length) {
+    el.c.wbBox.classList.add('hidden');
+    el.c.wbEnabled.checked = true;
+    return;
+  }
+
+  el.c.wbBox.classList.remove('hidden');
+  // 老数据没有这个字段 —— 默认视为启用（导入即可用）
+  el.c.wbEnabled.checked = character.worldbookEnabled !== false;
+
+  const names = books.map((b) => b.name).join('、');
+  const count = books.reduce((n, b) => n + (Array.isArray(b.entries) ? b.entries.length : 0), 0);
+  el.c.wbDesc.textContent = `这张卡自带 ${books.length} 本世界书（共 ${count} 条）：${names}`;
+
+  el.c.wbHint.textContent = el.c.wbEnabled.checked
+    ? '现在生效。单独跟它聊天时会带上这些设定；但绑进某个世界当角色时不生效 —— 那条会话已经有自己的世界观了。'
+    : '已停用。无论单独聊天、还是绑进某个世界当角色，都不会带入这几本书 —— 这张卡保持干净。';
 }
 
 // ---------------------------------------------------------------------------
@@ -6518,6 +6582,11 @@ function stashCharForm() {
     .map((a) => ({ name: a.name.trim().slice(0, 24), value: String(a.value || '').slice(0, 200) }))
     .slice(0, MAX_PANEL_FIELDS);
   character.avatar = charDraftAvatar;
+  // 角色自带世界书的开关。整块藏起来时（这张卡没有绑书）不写这个字段，
+  // 免得给没有书的角色平白加一个属性。
+  if (!el.c.wbBox.classList.contains('hidden')) {
+    character.worldbookEnabled = el.c.wbEnabled.checked;
+  }
   character.updatedAt = now();
 }
 
