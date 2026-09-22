@@ -757,6 +757,17 @@ function messageNode(message, index, character, labels) {
       draw.addEventListener('click', () => illustrateMessage(index));
       actions.appendChild(draw);
     }
+
+    // 帮我想想：卡住不知道说什么时，让 AI 给几个下一步让你挑
+    if (isLast && String(message.content || '').trim()) {
+      const suggest = document.createElement('button');
+      suggest.className = 'mini-btn';
+      suggest.textContent = '帮我想想';
+      suggest.title = '让 AI 给几个下一步，点一下就直接发出去';
+      suggest.setAttribute('aria-label', '让 AI 帮我想下一步');
+      suggest.addEventListener('click', () => suggestNextActions(suggest));
+      actions.appendChild(suggest);
+    }
   }
 
   // 删除这一条消息（会先弹确认框）
@@ -848,6 +859,12 @@ function renderMessages(options) {
 }
 
 function renderAll(options) {
+  // 建议是「针对某个会话的当前局面」给的 —— 换了会话就不该继续挂着
+  const convoNow = activeConvo();
+  if (suggestionsConvoId && suggestionsConvoId !== (convoNow ? convoNow.id : null)) {
+    hideSuggestions();
+  }
+
   renderConvoList();
   renderHeader();
   renderModelSwitch();
@@ -3059,6 +3076,165 @@ async function recallSection(convo) {
 }
 
 // ---------------------------------------------------------------------------
+//  帮我想想：给玩家几个下一步让他挑
+//
+//  卡住不知道说什么，是长对话里最常见的体验问题。这里让模型基于当前局面
+//  给几个「玩家可以怎么接」的具体选项，点一下就当玩家的话发出去。
+//
+//  提示词刻意保持中性：只要求「贴当前局面、彼此不同、是玩家视角的动作或话」，
+//  不涉及内容尺度 —— 写成什么样由模型自己决定。
+// ---------------------------------------------------------------------------
+
+// 一次给几个选项
+const SUGGEST_COUNT = 4;
+// 单个选项的字数上限，免得点下去变成一大段
+const MAX_SUGGEST_CHARS = 120;
+// 当前建议属于哪个会话 —— 切走时要清掉
+let suggestionsConvoId = null;
+
+function suggestInstruction() {
+  return (
+    '请基于上面这段对话，替「玩家」想几个接下来可以怎么做 / 怎么说的选项。\n' +
+    '\n' +
+    '要求：\n' +
+    `1. 给 ${SUGGEST_COUNT} 个，每一个都要贴着当前局面，不要泛泛而谈。\n` +
+    '2. 每个选项要明显不同 —— 可以是不同的态度、不同的做法、或者不同的对象，\n' +
+    '   不要四个都是同一件事的不同说法。\n' +
+    '3. 用玩家第一人称，写他实际会说的话或会做的动作，\n' +
+    `   每条控制在一句话内（不超过 ${MAX_SUGGEST_CHARS} 字），不要写成小作文。\n` +
+    '4. 直接输出选项本身，不要序号、不要引号、不要解释、不要标题。\n' +
+    '5. 每行一个。'
+  );
+}
+
+/** 从模型回复里解析出选项：一行一个，容忍它带了序号或引号 */
+function parseSuggestions(text) {
+  const lines = String(text || '').split('\n');
+  const out = [];
+
+  for (const raw of lines) {
+    let line = raw.trim();
+    if (!line) continue;
+
+    // 容忍「1. 」「1、」「- 」「• 」这类前缀
+    line = line.replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '');
+    // 容忍整行被引号包起来
+    line = line.replace(/^[「『"'“”‘’]+/, '').replace(/[」』"'“”‘’]+$/, '').trim();
+
+    if (!line) continue;
+    if (line.length > MAX_SUGGEST_CHARS) line = `${line.slice(0, MAX_SUGGEST_CHARS)}…`;
+
+    if (!out.includes(line)) out.push(line);
+    if (out.length >= SUGGEST_COUNT) break;
+  }
+
+  return out;
+}
+
+function hideSuggestions() {
+  el.suggestStrip.classList.add('hidden');
+  el.suggestList.innerHTML = '';
+  suggestionsConvoId = null;
+}
+
+function renderSuggestions(options) {
+  el.suggestList.innerHTML = '';
+
+  if (!options || !options.length) {
+    hideSuggestions();
+    return;
+  }
+
+  const convo = activeConvo();
+  suggestionsConvoId = convo ? convo.id : null;
+
+  options.forEach((text) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'suggest-btn';
+    btn.textContent = text;
+    btn.title = '点一下，就当你说这句话发出去';
+    btn.addEventListener('click', () => {
+      if (state.streaming) {
+        showToast('正在生成，等它写完再用');
+        return;
+      }
+      hideSuggestions();
+      el.input.value = text;
+      autoGrowInput();
+      sendMessage(text);
+    });
+    el.suggestList.appendChild(btn);
+  });
+
+  el.suggestStrip.classList.remove('hidden');
+}
+
+/** 点「帮我想想」：要几个选项，渲染成按钮 */
+async function suggestNextActions(trigger) {
+  const convo = activeConvo();
+  if (!convo) return;
+
+  if (state.streaming) {
+    showToast('正在生成，等它写完再想');
+    return;
+  }
+
+  const endpoint = ensureConvoEndpoint(convo);
+  if (!endpoint) {
+    showToast('还没有配置模型服务', 'error');
+    return;
+  }
+
+  const history = convo.messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
+  );
+  if (!history.length) {
+    showToast('还没有对话内容，先聊两句', 'error');
+    return;
+  }
+
+  const label = trigger || null;
+  const originalText = label ? label.textContent : '';
+  if (label) {
+    label.disabled = true;
+    label.textContent = '在想…';
+  }
+
+  try {
+    // 只带最近几轮，够模型判断局面就行，不用把整段历史塞进去
+    const recent = history.slice(-6).map((m) => ({ role: m.role, content: m.content }));
+    recent.push({ role: 'user', content: suggestInstruction() });
+
+    const response = await api.sendChat({
+      requestId: `suggest-${uid()}`,
+      providerId: endpoint.provider.id,
+      model: endpoint.model,
+      messages: recent
+    });
+
+    if (!response || response.ok !== true) {
+      throw new Error((response && response.error) || '想不出来');
+    }
+
+    const options = parseSuggestions(response.content);
+    if (!options.length) {
+      showToast('这次没想出可用的选项，再点一次试试', 'error');
+      return;
+    }
+
+    renderSuggestions(options);
+  } catch (err) {
+    showToast((err && err.message) || '想不出来，稍后再试', 'error');
+  } finally {
+    if (label) {
+      label.disabled = false;
+      label.textContent = originalText || '帮我想想';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
 
@@ -5088,6 +5264,9 @@ function bindEvents() {
 
   // 视角设置（叙述模式 + GM 模式），改动即时生效
   el.btnPerspective.addEventListener('click', openPerspectiveModal);
+
+  // 建议条：点 ✕ 收起
+  el.btnSuggestClose.addEventListener('click', hideSuggestions);
   el.btnClosePerspective.addEventListener('click', closePerspectiveModal);
   el.btnClosePerspective2.addEventListener('click', closePerspectiveModal);
 

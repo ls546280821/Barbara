@@ -371,6 +371,35 @@ function registerStubs() {
     const requestId = (payload && payload.requestId) || 'req-smoke';
     const model = (payload && payload.model) || 'test-model';
 
+    // 「帮我想想」会带一条特殊的指令；这时给回几个选项，好让测试能验证解析与渲染。
+    // 故意让模型「不听话」带序号和引号，测试要能容忍。
+    const askedForSuggestions = ((payload && payload.messages) || []).some((m) =>
+      String((m && m.content) || '').includes('替「玩家」想几个')
+    );
+    if (askedForSuggestions) {
+      const suggestions = [
+        '1. 「我想先喝一杯，压压惊」',
+        '2. 我直接问他叫什么名字',
+        '3. 我假装什么都没听见，继续吃',
+        '4. 我站起来准备走',
+        '5. 这条应该被丢掉（只取前 4 个）'
+      ].join('\n');
+
+      for (const piece of suggestions.match(/[\s\S]{1,20}/g) || []) {
+        if (!event.sender.isDestroyed()) event.sender.send('chat:chunk', { requestId, text: piece });
+        await sleep(4);
+      }
+
+      return {
+        ok: true,
+        requestId,
+        model,
+        content: suggestions,
+        reasoning: '',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+      };
+    }
+
     replySeq += 1;
     const CONTENT = `冒烟测试回复 #${replySeq}：我收到了。**这是加粗**，==这是高亮==。`;
     const pieces = [`冒烟测试回复 #${replySeq}`, '：我收到了。', '**这是加粗**，', '==这是高亮==。'];

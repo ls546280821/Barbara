@@ -60,6 +60,10 @@ export const el = {
   btnCloseAppearance2: $('btn-close-appearance-2'),
   // 视角设置
   btnPerspective: $('btn-perspective'),
+  // 「帮我想想」的建议条
+  suggestStrip: $('suggest-strip'),
+  suggestList: $('suggest-list'),
+  btnSuggestClose: $('btn-suggest-close'),
   perspectiveModal: $('perspective-modal'),
   btnClosePerspective: $('btn-close-perspective'),
   btnClosePerspective2: $('btn-close-perspective-2'),

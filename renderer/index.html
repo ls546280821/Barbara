@@ -81,6 +81,14 @@
       <footer class="composer">
         <!-- 待发送的图片。加图之后出现在输入框上方，每张右上角有 × -->
         <div id="attach-strip" class="attach-strip hidden" aria-label="待发送的图片"></div>
+        <!-- 「帮我想想」给出的几个下一步。点一下就当成你说的话发出去 -->
+        <div id="suggest-strip" class="suggest-strip hidden" aria-label="可以这样接话">
+          <div class="suggest-head">
+            <span class="suggest-title">可以这样接</span>
+            <button id="btn-suggest-close" class="suggest-close" type="button" title="收起" aria-label="收起建议">✕</button>
+          </div>
+          <div id="suggest-list" class="suggest-list"></div>
+        </div>
         <div class="composer-box">
           <button id="btn-attach" class="icon-btn attach-btn" type="button"
                   title="加一张图（也可以直接粘贴或拖进来）" aria-label="添加图片">

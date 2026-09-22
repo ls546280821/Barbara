@@ -864,6 +864,67 @@ body {
   margin: 0 auto 8px;
 }
 
+/* ---------------------- 「帮我想想」的建议条 ---------------------- */
+
+/* 摆在输入框上方。每个选项是一颗按下去就发出去的按钮。 */
+.suggest-strip {
+  max-width: 860px;
+  margin: 0 auto 8px;
+  padding: 9px 11px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-side);
+}
+
+.suggest-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.suggest-title { font-size: 11.5px; color: var(--text-faint); }
+
+.suggest-close {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 5px;
+}
+
+.suggest-close:hover { color: var(--text); background: var(--bg-input); }
+
+.suggest-list { display: flex; flex-direction: column; gap: 6px; }
+
+/* 每颗按钮左对齐、可以折行 —— 选项长短差别大，居中反而不好扫 */
+.suggest-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.suggest-btn:hover {
+  border-color: rgba(74, 134, 232, 0.45);
+  background: var(--accent-soft);
+}
+
+.suggest-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
 .attach-item {
   position: relative;
   width: 64px;

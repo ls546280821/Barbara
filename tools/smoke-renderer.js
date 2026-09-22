@@ -1389,4 +1389,74 @@ await scenario('准备悬停验证', async () => {
   check('卡片已就位，坐标可交给宿主', !!hoverProbe && hoverProbe.x > 0 && hoverProbe.y > 0, JSON.stringify(hoverProbe));
 });
 
+// ---------------------------------------------------------------------------
+//  帮我想想：给几个下一步让你挑
+// ---------------------------------------------------------------------------
+await scenario('帮我想想（给几个下一步）', async () => {
+  // 回聊天视图，并确保末尾有一条 AI 回复（工具条上才有「帮我想想」）
+  const convoItem = $('#convo-list .convo-item');
+  if (convoItem) {
+    click(convoItem);
+    await waitFor('切回聊天视图', () => shown('#view-chat'));
+    await sleep(250);
+  }
+
+  const lastAssistant = () => $$('#messages .msg.assistant').pop();
+  const actionsOf = (node) =>
+    node ? Array.from(node.querySelectorAll('.msg-actions .mini-btn')).map((b) => b.textContent.trim()) : [];
+
+  check('AI 回复上有「帮我想想」', actionsOf(lastAssistant()).includes('帮我想想'), JSON.stringify(actionsOf(lastAssistant())));
+  check('用户消息上没有「帮我想想」', !actionsOf($$('#messages .msg.user').pop()).includes('帮我想想'));
+
+  // 建议条默认收起、且是空的
+  check('建议条默认不显示', !shown('#suggest-strip'));
+  check('建议列表一开始是空的', byId('suggest-list').children.length === 0);
+
+  // 点「帮我想想」→ 假后端会回 5 条带序号和引号的选项
+  const trigger = Array.from(lastAssistant().querySelectorAll('.msg-actions .mini-btn'))
+    .find((b) => b.textContent.trim() === '帮我想想');
+  click(trigger);
+  await waitFor('建议出现', () => shown('#suggest-strip') && byId('suggest-list').children.length > 0, 8000);
+  await sleep(200);
+
+  const items = $$('#suggest-list .suggest-btn');
+  const texts = items.map((b) => b.textContent.trim());
+
+  check('渲染出 4 个建议按钮（第 5 条被丢掉）', items.length === 4, `${items.length}: ${JSON.stringify(texts)}`);
+  check('按钮都是 button 元素', items.every((b) => b.tagName === 'BUTTON'), true);
+  check('序号被剥掉', !texts.some((t) => /^\d+\s*[.、)）]/.test(t)), JSON.stringify(texts));
+  check('引号被剥掉', !texts.some((t) => /^[「『"']/.test(t) || /[」』"']$/.test(t)), JSON.stringify(texts));
+  check('第一条内容正确', texts[0] === '我想先喝一杯，压压惊', JSON.stringify(texts[0]));
+  check('四条彼此不同', new Set(texts).size === texts.length, JSON.stringify(texts));
+
+  // 点第一条 → 当成玩家的话发出去，建议条收起
+  const beforeUser = $$('#messages .msg.user').length;
+  click(items[0]);
+  await sleep(250);
+
+  check('点选项后建议条自动收起', !shown('#suggest-strip'));
+  await waitFor('选项被当成玩家消息发出', () => $$('#messages .msg.user').length === beforeUser + 1, 8000);
+  check('发出去的就是选项内容',
+    String($$('#messages .msg.user').pop().textContent || '').includes('我想先喝一杯，压压惊'));
+
+  // 等这轮回复收尾，别把后面的场景搅乱
+  await waitFor('这一轮回复结束', () => {
+    const nodes = $$('#messages .msg.assistant');
+    return nodes.length > 0 && !nodes[nodes.length - 1].querySelector('.waiting');
+  }, 8000);
+  await sleep(250);
+
+  // ✕ 能收起
+  const trigger2 = Array.from(lastAssistant().querySelectorAll('.msg-actions .mini-btn'))
+    .find((b) => b.textContent.trim() === '帮我想想');
+  if (trigger2) {
+    click(trigger2);
+    await waitFor('建议再次出现', () => shown('#suggest-strip'), 8000);
+    click('#btn-suggest-close');
+    await sleep(150);
+    check('点 ✕ 能收起建议条', !shown('#suggest-strip'));
+    check('收起后列表也清空', byId('suggest-list').children.length === 0);
+  }
+});
+
 return { results, notes, hoverProbe };
