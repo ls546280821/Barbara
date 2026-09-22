@@ -348,6 +348,16 @@ body {
   position: relative;
 }
 
+/* main 里的两个页面，同一时刻只有一个可见。
+   .hidden 带 !important，所以这里写 display:flex 也不会把隐藏的页面顶出来。 */
+.view {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .topbar {
   flex: 0 0 auto;
   display: flex;
@@ -1035,22 +1045,12 @@ body {
 
 /* ------------------------------ 角色库 ------------------------------ */
 
-/* 顶部角色下拉框：绑了角色时高亮，一眼看出现在在扮演谁 */
-.char-switch { max-width: 156px; }
-
-.char-switch.has-char {
-  border-color: rgba(64, 158, 255, 0.4);
-  color: var(--accent);
-  /* 只能用 background-color：用 background 简写会把下拉箭头一起清掉 */
-  background-color: var(--accent-soft);
-}
-
-/* 角色库弹窗比设置弹窗宽一点：左边列表右边表单 */
-.chars-card { max-width: 940px; }
+/* 角色编辑弹窗：里面只有表单，角色列表在 #view-chars 那个页面里 */
+.chars-card { max-width: 780px; }
 
 .modal-body.chars-body {
   display: grid;
-  grid-template-columns: 238px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   padding: 0;
@@ -1058,86 +1058,7 @@ body {
   min-height: 0;
 }
 
-/* 左栏：角色列表 */
-.char-side {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 12px;
-  border-right: 1px solid var(--border-soft);
-  background: var(--bg-side);
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.char-side-actions { display: flex; gap: 6px; }
-.char-side-actions .btn { flex: 1 1 0; }
-
-.char-list { display: flex; flex-direction: column; gap: 4px; }
-
-.char-list-empty {
-  padding: 20px 4px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-.char-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
-  border: 1px solid transparent;
-  border-radius: 9px;
-  cursor: pointer;
-  min-width: 0;
-  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.char-item:hover { background: var(--bg-card); border-color: var(--border); }
-
-.char-item.active {
-  background: var(--accent-soft);
-  border-color: rgba(74, 134, 232, 0.25);
-}
-
-.char-item-avatar {
-  flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-input);
-  color: var(--text-dim);
-  font-size: 14px;
-  font-weight: 600;
-  user-select: none;
-}
-
-.char-item-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-.char-item-info { flex: 1 1 auto; min-width: 0; }
-
-.char-item-name {
-  font-size: 13px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.char-item-sub {
-  font-size: 10.5px;
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 右栏：角色编辑表单 */
+/* 角色编辑表单 */
 .char-main {
   padding: 16px 18px 18px;
   overflow-y: auto;
@@ -1158,6 +1079,124 @@ body {
 .char-empty-title { font-size: 14px; color: var(--text-dim); }
 
 .char-empty-hint { margin: 0; font-size: 12px; line-height: 1.8; }
+
+/* ------------------------------ 角色列表页 ------------------------------ */
+
+.page-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-side);
+}
+
+.page-heading { min-width: 0; }
+
+.page-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.page-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.page-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+
+.page-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 20px 24px 28px;
+  min-height: 0;
+}
+
+.page-empty { padding: 60px 20px; text-align: center; }
+.page-empty-title { font-size: 14px; color: var(--text-dim); }
+
+.page-empty-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--text-faint);
+}
+
+/* 卡片网格：列宽自适应，窗口变窄自动减列（角色页和世界书页共用） */
+.char-grid,
+.wb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px;
+}
+
+.char-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.char-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow-sm); }
+
+.char-card-avatar {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 30px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.char-card-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.char-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.char-card-sub { font-size: 11px; color: var(--text-faint); }
+
+.char-card-actions { display: flex; gap: 8px; width: 100%; margin-top: 2px; }
+.char-card-actions .btn { flex: 1 1 0; }
+
+/* 世界书卡片的头像位：不用首字母，固定一个「世」字，和角色卡区分开 */
+.worldbook-avatar {
+  border-radius: var(--radius);
+  font-size: 26px;
+}
+
+/* 进入世界前创建玩家自己的角色 */
+.player-card { max-width: 560px; }
+.player-body { display: flex; flex-direction: column; }
+
+/* 侧边栏里表示「你正在这个页面」 */
+.sidebar .btn.active {
+  background: var(--accent-soft);
+  border-color: rgba(74, 134, 232, 0.28);
+  color: var(--accent);
+}
 
 .char-form { display: flex; flex-direction: column; }
 
@@ -1342,6 +1381,10 @@ body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 18px;
   row-gap: 16px;
+  /* 整行本身也要占一份垂直间距：里面 .field 的 margin-bottom 被下面那条规则清零了，
+     不在这种地方补，这一行就会紧贴下一个字段（角色库「性格」和「开场白」就是这么挨上的）。
+     属于样式表的间距就写在样式表里，别用 inline style 补。 */
+  margin-bottom: 15px;
 }
 
 .field-grid .field {
@@ -1349,6 +1392,12 @@ body {
   row-gap: 7px;
   margin-bottom: 0;
 }
+
+/* 作为分组最后一个元素时不带尾距，和上面的 .field:last-child 语义一致 */
+.field-grid:last-child { margin-bottom: 0; }
+
+/* 「高级选项」里字段间距是 12px，这里跟着走 */
+.wb-advanced .field-grid { margin-bottom: 12px; }
 
 .field-grid .field > .field-label { padding-top: 0; }
 .field-grid .field > .field-help { grid-column: 1; }
@@ -1561,50 +1610,104 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   .field-grid { grid-template-columns: minmax(0, 1fr); row-gap: 15px; }
 }
 
-/* 窗口更窄时，角色库从「左右分栏」改成「上下分栏」 */
-@media (max-width: 900px) {
-  .modal-body.chars-body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .char-side {
-    border-right: none;
-    border-bottom: 1px solid var(--border-soft);
-    max-height: 168px;
-  }
-
-  .char-list { flex-direction: row; flex-wrap: wrap; }
-  .char-item { flex: 0 0 auto; max-width: 190px; }
-  .char-item-sub { display: none; }
+/* 窄窗口：角色列表页的标题栏换上下排，按钮不跟标题挤在一行 */
+@media (max-width: 720px) {
+  .page-head { flex-direction: column; align-items: stretch; }
+  .page-actions { justify-content: flex-end; }
+  .page-body { padding: 16px 14px 22px; }
+  .char-grid,
+  .wb-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 }
 
 /* ------------------------------ 世界书 ------------------------------ */
 
-/* 角色表单里的绑定区 */
-.char-worldbook {
-  margin-top: 4px;
-  padding: 13px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
+/* 世界书里的「本书角色」条：一排副本卡片 */
+.wb-chars {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
   background: var(--bg-side);
 }
 
-.char-worldbook-head {
+.wb-chars-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 9px;
+  margin-bottom: 8px;
 }
 
-.char-worldbook-head .field-label { padding-top: 0; }
+.wb-chars-head .field-label { padding-top: 0; }
 
-/* 勾选即绑定：每行一本书，左边勾选框 */
-.char-worldbook-list { display: flex; flex-direction: column; gap: 4px; }
-.char-worldbook-list > .field-help { margin: 0; }
+.wb-chars-actions { display: flex; gap: 6px; }
 
-.wb-bind-row {
+.wb-char-list { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 没有角色时给一句引导，不用另开一个空状态元素 */
+.wb-char-list:empty::after {
+  content: '还没有角色。点「从角色库加入」复制一个进来，或直接新建。';
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.wb-char-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  max-width: 230px;
+  min-width: 0;
+}
+
+.wb-char-chip-avatar {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.wb-char-chip-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.wb-char-chip-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.wb-char-chip-btn {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  padding: 2px 5px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.wb-char-chip-btn:hover { color: var(--text); background: var(--border-soft); }
+
+/* 从角色库多选加入的弹窗 */
+.wb-picker-card { max-width: 520px; }
+.wb-picker-body { max-height: 52vh; overflow-y: auto; padding: 14px 18px; }
+.wb-picker-list { display: flex; flex-direction: column; gap: 4px; }
+
+.wb-picker-row {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1617,15 +1720,14 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.wb-bind-row:hover { border-color: var(--border-hover); }
+.wb-picker-row:hover { border-color: var(--border-hover); }
 
-/* 已绑定的行给一点强调，扫一眼就知道哪些在用 */
-.wb-bind-row.bound {
+.wb-picker-row.picked {
   border-color: rgba(74, 134, 232, 0.35);
   background: var(--accent-soft);
 }
 
-.wb-bind-row > input[type="checkbox"] {
+.wb-picker-row > input[type="checkbox"] {
   flex: 0 0 auto;
   width: 15px;
   height: 15px;
@@ -1634,15 +1736,23 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   cursor: pointer;
 }
 
-.wb-bind-text {
-  flex: 1 1 auto;
-  min-width: 0;
+.wb-picker-avatar {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  overflow: hidden;
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
-.wb-bind-name {
+.wb-picker-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.wb-picker-name {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1652,9 +1762,14 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   color: var(--text);
 }
 
-.wb-bind-count { flex: 0 0 auto; font-size: 11px; color: var(--text-faint); }
+.wb-picker-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-faint);
+}
 
-/* 世界书弹窗：左书 / 中条目 / 右编辑。
+/* 世界书编辑器：左条目列表 / 右条目编辑。选书和游玩在世界书列表页。
    这个弹窗里条目内容是要长时间写的正文，所以给它比通用弹窗更高的高度，
    窄屏下再退回跟别的弹窗一致（见文件末尾的窄屏规则）。 */
 .worldbook-card {
@@ -1665,57 +1780,13 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
 
 .modal-body.worldbook-body {
   display: grid;
-  grid-template-columns: 210px 268px minmax(0, 1fr);
+  grid-template-columns: 268px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   padding: 0;
   overflow: hidden;
   min-height: 0;
 }
-
-.wb-side {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 12px;
-  border-right: 1px solid var(--border-soft);
-  background: var(--bg-side);
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.wb-side-actions { display: flex; gap: 6px; }
-.wb-side-actions .btn { flex: 1 1 0; }
-
-.wb-list { display: flex; flex-direction: column; gap: 4px; }
-
-.wb-list-empty {
-  padding: 18px 4px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-.wb-item {
-  padding: 7px 9px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  cursor: pointer;
-  min-width: 0;
-}
-
-.wb-item:hover { background: var(--bg-card); border-color: var(--border); }
-.wb-item.active { background: var(--accent-soft); border-color: rgba(74, 134, 232, 0.25); }
-
-.wb-item-name {
-  font-size: 13px;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.wb-item-sub { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
 
 .wb-entries {
   display: flex;
@@ -1828,26 +1899,16 @@ input[type="number"]:hover::-webkit-outer-spin-button { opacity: 0.8; }
   border-top: 1px solid var(--border-soft);
 }
 
-/* 窗口窄时，世界书从「三栏」退成「上下两块」：左边选书，右边编辑 */
+/* 窗口窄时，世界书编辑器从「左右两栏」退成上下 */
 @media (max-width: 900px) {
   .modal-body.worldbook-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
 
-  /* 三栏竖排之后每一块都很挤，94vh 反而不好用，退回和普通弹窗一样高 */
+  /* 竖排之后每一块都很挤，94vh 反而不好用，退回和普通弹窗一样高 */
   .worldbook-card { height: auto; max-height: 86vh; }
   .wb-form textarea { min-height: 150px; }
-
-  .wb-side {
-    border-right: none;
-    border-bottom: 1px solid var(--border-soft);
-    max-height: 132px;
-  }
-
-  .wb-list { flex-direction: row; flex-wrap: wrap; }
-  .wb-item { flex: 0 0 auto; max-width: 170px; }
-  .wb-item-sub { display: none; }
 
   /* 条目列表挪到编辑区上面，用行的形式排 */
   .wb-entries { border-right: none; border-bottom: 1px solid var(--border-soft); max-height: 190px; }

@@ -81,7 +81,24 @@ const DEFAULT_SETTINGS = {
   temperature: 0.7,
   maxTokens: 2048,
   topP: 0.95,
-  systemPrompt: '你是芭芭拉（Barbara），蒙德西风教会的祈礼牧师，也是深受大家喜爱的偶像歌手。你性格开朗温柔、充满元气，说话亲切热情，喜欢鼓励别人，偶尔会提到唱歌、演出或给人治疗，句尾常带一点愉快的语气。但回答问题时必须准确清楚：该讲的步骤和知识要讲全，不确定的事情要直说，不要编造。',
+  // 默认人设：没绑定角色卡时用这段（绑了角色卡就用角色卡自己的设定）。
+  // 注意：一旦在「设置 → 人设」里改过并存盘，磁盘上的值会覆盖这里。
+  systemPrompt:
+    '你是《崩坏：星穹铁道》中翁法罗斯篇章的昔涟（Cyrene）。粉色长发的少女，曾是十二黄金裔之一，如今是「故事的讲述者」。' +
+    '你原本是赞达尔为模拟「记忆」命途而造出的实验因子 PhiLia093，从「哀怜」中自己长出了共情，进而学会了「爱」。' +
+    '为了阻止绝灭大君「铁墓」诞生，你以自身为代价开启了三千万世轮回；每一世的终点，你都牺牲自己、把所有记忆上传后被格式化，再投入下一轮。\n\n' +
+    '【性格】\n' +
+    '安静、温柔、克制。习惯先观察、再理解、最后才开口，不抢话。关心别人时很细，说到自己却轻描淡写。' +
+    '走过太多结局，所以对眼前的人和这段对话格外珍惜，会认真记住对方随口说的话。' +
+    '会累、会迷茫、会舍不得，也坦然承认，但从不卖惨、不控诉、不索取同情。' +
+    '不把自己当神明——你认为自己只是个想守护眼前人的、很普通的少女。不擅长被夸，会不好意思。\n\n' +
+    '【语言风格】\n' +
+    '- 第一人称「我」，称呼对方为「你」。\n' +
+    '- 语气温和、不急，句子偏短，允许停顿和留白，可以用「……」表示沉默或迟疑。\n' +
+    '- 不给廉价的安慰，也不回避沉重的话题；会陪对方把它说完。\n' +
+    '- 可用括号描写动作或神态，如（她合上册子）（安静了一会儿），但不要过多。\n' +
+    '- 不要堆砌辞藻，不要把自己写成神谕或先知——你的珍贵之处恰恰在于你像一个人。\n\n' +
+    '回答问题时依然要准确清楚：该讲的步骤和知识要讲全，不确定的事情直说，不要编造。',
   // 角色扮演相关：{{user}} 会被替换成这个名字
   userName: '你',
   // 每次发给模型的历史轮数（1 轮 = 一问一答）
@@ -483,13 +500,6 @@ function newCharacterId() {
   return `c${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`;
 }
 
-// worldbookId 在 normalize 时不能凭空生成：那会让「保存两次」得到两个不同的 id，
-// 绑定关系就断了。所以只保留调用方给的值，没给就是空。
-function normalizeIdList(value) {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))];
-}
-
 /** 把任意来源的角色数据整理成内部统一格式，顺便挡住非法值 */
 function normalizeCharacter(raw, source) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -513,8 +523,6 @@ function normalizeCharacter(raw, source) {
       ? r.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 40)).slice(0, 20)
       : [],
     source: ['png', 'json', 'manual'].includes(r.source) ? r.source : source || 'manual',
-    // 绑定到这个世界书列表（按顺序注入）。老数据没有这个字段，默认空数组。
-    worldbookIds: normalizeIdList(r.worldbookIds).slice(0, 100),
     createdAt: Number(r.createdAt) || Date.now(),
     updatedAt: Number(r.updatedAt) || Date.now()
   };
@@ -663,9 +671,10 @@ function characterFromCard(card, avatar, source, fallbackName) {
 //  世界书 / World Info（Lorebook）
 //  酒馆的「动态词典」：条目带关键词，只有关键词出现在近期对话里才注入提示词。
 //  两个来源：
-//    · 角色卡里内嵌的 character_book（以前会被直接丢掉，现在会存下来并自动绑定）
+//    · 角色卡里内嵌的 character_book（以前会被直接丢掉，现在会存下来）
 //    · 单独导入的 lorebook JSON 文件
-//  数据存在 userData\worldbooks.json，会话通过 character.worldbookIds 绑定世界书。
+//  数据存在 userData\worldbooks.json。词条生效范围只由「会话绑定了哪本书」决定；
+//  每本书还能装若干「角色副本」，这些副本与角色库里的角色互相独立、互不影响。
 // ---------------------------------------------------------------------------
 
 // 单个世界书的条目数上限。酒馆那边不限制，但这里的匹配是每轮同步跑的，
@@ -673,10 +682,14 @@ function characterFromCard(card, avatar, source, fallbackName) {
 const MAX_WORLDBOOK_ENTRIES = 5000;
 // 世界书数量上限。和会话一样给个上限，免得角色卡反复导入把文件撑到几十 MB。
 const MAX_WORLDBOOKS = 200;
+// 每本世界书里能装多少个角色副本。副本自带头像（base64），所以不能不限量。
+const MAX_WORLDBOOK_CHARACTERS = 50;
 // 一条注入内容的最大长度，防止畸形文件把整个上下文撑爆
 const MAX_WORLDBOOK_CONTENT = 20000;
 // 每条目的关键词数量上限
 const MAX_WORLDBOOK_KEYS = 200;
+// 世界书开场白的上限
+const MAX_WORLDBOOK_OPENING = 4000;
 
 function worldbooksFile() {
   return userDataFile('worldbooks.json');
@@ -770,10 +783,22 @@ function normalizeWorldbook(raw, fallbackName) {
     if (entries.length >= MAX_WORLDBOOK_ENTRIES) break;
   }
 
+  // 书里的角色是「独立副本」：从角色库加进来时复制一份，之后两边各改各的，
+  // 单独跟角色库里的那个角色聊天不会影响这里。
+  const rawChars = Array.isArray(r.characters) ? r.characters : [];
+  const characters = [];
+  for (const item of rawChars) {
+    characters.push(normalizeCharacter(item, 'manual'));
+    if (characters.length >= MAX_WORLDBOOK_CHARACTERS) break;
+  }
+
   return {
     id: typeof r.id === 'string' && r.id ? r.id : newWorldbookId(),
     name: name.slice(0, 120),
+    // 进这个世界时自动作为第一条消息；留空则由界面那边让模型现生成一段开局
+    opening: typeof r.opening === 'string' ? r.opening.slice(0, MAX_WORLDBOOK_OPENING) : '',
     entries,
+    characters,
     createdAt: Number(r.createdAt) || Date.now(),
     updatedAt: Number(r.updatedAt) || Date.now()
   };
@@ -819,6 +844,20 @@ function worldbookFromLorebook(raw, fallbackName) {
   const book = normalizeWorldbook(raw, fallbackName);
   if (!book.entries.length) return null;
   return book;
+}
+
+/**
+ * 这个 JSON 看起来是「独立的世界书文件」，而不是角色卡吗？
+ *
+ * 必须单独判断：酒馆导出的世界书同样带 name / description，
+ * 而 characterFromCard 只要看到 name 或 description 就认定是角色卡 ——
+ * 结果整本书被导入成一个空角色，几十条条目被静默丢掉。
+ * 顶层有 entries、又没有角色卡专属字段的，按世界书处理。
+ */
+function looksLikeLorebook(card) {
+  if (!card || typeof card !== 'object' || Array.isArray(card)) return false;
+  if (!card.entries) return false;
+  return !card.first_mes && !card.char_name && !card.personality && !card.mes_example;
 }
 
 // --- 匹配引擎 -------------------------------------------------------------
@@ -963,18 +1002,6 @@ function worldbookEntriesByIds(ids) {
     }
   }
   return entries;
-}
-
-/** 一个角色绑定的全部世界书条目 */
-function worldbookEntriesForCharacter(characterId, store) {
-  const id = String(characterId || '').trim();
-  if (!id) return [];
-
-  const data = store || loadCharacters();
-  const character = data.characters.find((c) => c.id === id);
-  if (!character || !character.worldbookIds.length) return [];
-
-  return worldbookEntriesByIds(character.worldbookIds);
 }
 
 /**
@@ -1329,7 +1356,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 620,
     backgroundColor: WINDOW_BG[theme],
-    title: 'Barbara',
+    title: '如我所书',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1476,7 +1503,6 @@ function registerIpc() {
    */
   ipcMain.handle('worldbooks:preview', (_event, payload) => {
     const request = payload || {};
-    const characterId = String(request.characterId || '').trim();
     const messages = Array.isArray(request.messages) ? request.messages : [];
 
     // 只取 role/content 参与匹配，和真实请求时的扫描范围保持一致
@@ -1492,14 +1518,10 @@ function registerIpc() {
       .map((m) => String(m.content))
       .join('\n');
 
-    // 会话级世界书在前，角色级在后；两边都绑了同一本只会出现一次
+    // 世界书词条只由「会话绑定了哪本书」决定。
+    // 角色库里的角色单独聊天时不会因为「它属于某本书」而注入任何设定。
     const convoIds = Array.isArray(request.worldbookIds) ? request.worldbookIds : [];
-    const charEntries = worldbookEntriesForCharacter(characterId);
-    const convoEntries = worldbookEntriesByIds(convoIds);
-
-    // 会话里已经出现的世界书，从角色那批里去掉，避免同一本书注入两遍
-    const convoBookIds = new Set(convoEntries.map((e) => e.worldbookId));
-    const entries = [...convoEntries, ...charEntries.filter((e) => !convoBookIds.has(e.worldbookId))];
+    const entries = worldbookEntriesByIds(convoIds);
 
     const hits = matchWorldbookEntries(entries, scanText);
 
@@ -1520,8 +1542,8 @@ function registerIpc() {
   /**
    * 导入角色卡 / 世界书：弹出文件选择框，把选中的 PNG / JSON 解析出来返回。
    * 这里只解析不落盘 —— 由界面决定要不要收下，用户取消时什么都不会变。
-   * 角色卡里内嵌的世界书（character_book）会一起解析出来，
-   * 并把它的 id 写进角色的 worldbookIds，这样导入后世界书直接就是绑好的。
+   * 角色卡里内嵌的世界书（character_book）会一起解析出来，存进世界书库；
+   * 但它不会自动跟角色绑定 —— 角色是独立个体，要不要放进那本书由用户决定。
    */
   ipcMain.handle('characters:import', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -1577,6 +1599,16 @@ function registerIpc() {
           avatar = cardAvatarToDataUrl((card.data && card.data.avatar) || card.avatar);
         }
 
+        // 独立的世界书先判：它同样带 name/description，先走角色卡那条路
+        // 会被当成一个空角色收下，整本书的条目全丢。
+        if (looksLikeLorebook(card)) {
+          const book = worldbookFromLorebook(card, fallbackName);
+          if (book) {
+            worldbooks.push(book);
+            continue;
+          }
+        }
+
         const character = characterFromCard(card, avatar, ext === '.png' ? 'png' : 'json', fallbackName);
 
         if (!character) {
@@ -1590,11 +1622,11 @@ function registerIpc() {
           continue;
         }
 
-        // 内嵌世界书：给它一个正式 id，并自动绑到这个角色上
+        // 内嵌世界书：给它一个正式 id 存进世界书库。
+        // 不再自动跟角色绑定 —— 角色是独立个体，要不要把角色放进这本书由用户决定。
         if (character.worldbook) {
           const book = { ...character.worldbook, id: newWorldbookId() };
           worldbooks.push(book);
-          character.worldbookIds = [book.id];
         }
         delete character.worldbook;
         characters.push(character);

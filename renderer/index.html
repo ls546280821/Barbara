@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
-  <title>Barbara</title>
+  <title>如我所书</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -13,7 +13,7 @@
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-dot"></span>
-        <span class="brand-name">♪ Barbara</span>
+        <span class="brand-name">♪ 如我所书</span>
         <button id="btn-theme" class="icon-btn brand-theme" type="button" title="切换为夜间模式" aria-label="切换为夜间模式" aria-pressed="false">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
@@ -40,13 +40,14 @@
 
     <!-- ================= 主对话区 ================= -->
     <main class="main">
+      <!-- 视图一：聊天 -->
+      <section id="view-chat" class="view">
       <header class="topbar">
         <div class="topbar-title">
           <h1 id="convo-title">新对话</h1>
           <p id="convo-meta" class="meta">未配置</p>
         </div>
         <div class="topbar-actions">
-          <select id="character-switch" class="model-switch char-switch" title="切换当前会话扮演的角色" aria-label="切换角色"></select>
           <select id="model-switch" class="model-switch" title="切换当前会话使用的模型" aria-label="切换模型"></select>
           <button id="btn-perspective" class="btn btn-ghost btn-sm" aria-label="打开视角设置">视角</button>
           <button id="btn-memory" class="btn btn-ghost btn-sm" aria-label="打开记忆管理">记忆<span id="memory-count" class="memory-badge hidden"></span></button>
@@ -85,7 +86,60 @@
         </div>
       </footer>
 
-      <!-- 提示条放在主区域内：这样它居中于对话区，而不是整个窗口 -->
+      </section>
+
+      <!-- 视图二：角色列表页 -->
+      <section id="view-chars" class="view hidden" aria-label="角色库">
+        <header class="page-head">
+          <div class="page-heading">
+            <h1 class="page-title">角色库</h1>
+            <p id="chars-page-sub" class="page-sub"></p>
+          </div>
+          <div class="page-actions">
+            <button id="btn-import-card" class="btn btn-ghost btn-sm" type="button">导入角色卡</button>
+            <button id="btn-new-char" class="btn btn-primary btn-sm" type="button">＋ 新建角色</button>
+          </div>
+        </header>
+
+        <div class="page-body">
+          <div id="char-page-grid" class="char-grid" role="list"></div>
+          <div id="char-page-empty" class="page-empty hidden">
+            <div class="page-empty-title">还没有角色</div>
+            <p class="page-empty-hint">
+              点右上角「导入角色卡」选一张酒馆的 PNG / JSON 卡，<br />
+              或者点「＋ 新建角色」自己写一个。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 视图三：世界书列表页 -->
+      <section id="view-worldbooks" class="view hidden" aria-label="世界书">
+        <header class="page-head">
+          <div class="page-heading">
+            <h1 class="page-title">世界书</h1>
+            <p id="wb-page-sub" class="page-sub"></p>
+          </div>
+          <div class="page-actions">
+            <button id="btn-import-lorebook" class="btn btn-ghost btn-sm" type="button">导入世界书</button>
+            <button id="btn-new-worldbook" class="btn btn-primary btn-sm" type="button">＋ 新建世界书</button>
+          </div>
+        </header>
+
+        <div class="page-body">
+          <div id="wb-page-grid" class="wb-grid" role="list"></div>
+          <div id="wb-page-empty" class="page-empty hidden">
+            <div class="page-empty-title">还没有世界书</div>
+            <p class="page-empty-hint">
+              点右上角「导入世界书」选一个酒馆的 lorebook JSON，<br />
+              或者点「＋ 新建世界书」自己写一个世界。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 提示条放在主区域内：这样它居中于对话区，而不是整个窗口。
+           故意放在两个视图外面，切换页面时提示不会跟着被藏起来。 -->
       <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
     </main>
   </div>
@@ -273,15 +327,16 @@
     </div>
   </div>
 
-  <!-- ================= 角色库弹窗 ================= -->
+  <!-- ================= 角色编辑弹窗 =================
+       这里只是「编辑某一个角色」的表单，角色列表在 #view-chars 那个页面里。 -->
   <div id="chars-modal" class="modal hidden">
     <div class="modal-card chars-card" role="dialog" aria-modal="true" aria-labelledby="chars-title">
       <header class="modal-head">
         <div class="modal-heading">
-          <h2 id="chars-title">角色库</h2>
-          <p class="modal-sub">导入酒馆角色卡，或自己写一个；然后在窗口顶部一键切换</p>
+          <h2 id="chars-title">编辑角色</h2>
+          <p id="chars-sub" class="modal-sub"></p>
         </div>
-        <button id="btn-close-chars" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭角色库">
+        <button id="btn-close-chars" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <path d="M18 6 6 18M6 6l12 12" />
           </svg>
@@ -289,23 +344,9 @@
       </header>
 
       <div class="modal-body chars-body">
-        <!-- 左：角色列表 -->
-        <aside class="char-side">
-          <div class="char-side-actions">
-            <button id="btn-import-card" class="btn btn-primary btn-sm" type="button">导入角色卡</button>
-            <button id="btn-new-char" class="btn btn-ghost btn-sm" type="button">新建</button>
-          </div>
-          <div id="char-list" class="char-list" role="list"></div>
-        </aside>
-
-        <!-- 右：角色编辑 -->
         <section class="char-main">
           <div id="char-empty" class="char-empty">
-            <div class="char-empty-title">还没有选中角色</div>
-            <p class="char-empty-hint">
-              点「导入角色卡」选一张酒馆的 PNG 卡（或 JSON），<br />
-              也可以点「新建」自己写一个。
-            </p>
+            <div class="char-empty-title">没有可编辑的角色</div>
           </div>
 
           <div id="char-form" class="char-form hidden">
@@ -319,7 +360,7 @@
               <div class="char-head-fields">
                 <label class="field">
                   <span class="field-label">角色名</span>
-                  <input id="c-name" type="text" spellcheck="false" placeholder="例如 芭芭拉" aria-label="角色名" />
+                  <input id="c-name" type="text" spellcheck="false" placeholder="例如 昔涟" aria-label="角色名" />
                 </label>
                 <label class="field">
                   <span class="field-label">标签</span>
@@ -377,19 +418,6 @@
                 <textarea id="c-notes" rows="2" spellcheck="false" placeholder="只给你自己看，不会发给模型"></textarea>
               </label>
             </details>
-
-            <!-- 世界书绑定：角色卡里内嵌的世界书会自动绑定并出现在这里 -->
-            <div class="char-worldbook">
-              <div class="char-worldbook-head">
-                <span class="field-label">世界书</span>
-                <button id="btn-open-worldbooks" class="btn btn-ghost btn-sm" type="button">打开世界书编辑器</button>
-              </div>
-              <div id="char-worldbook-list" class="char-worldbook-list"></div>
-              <p class="field-help">
-                勾选即绑定：只有勾上的世界书在这个角色身上生效。关键词出现在近期对话里才会注入。<br />
-                导入酒馆角色卡时，卡里内嵌的世界书会自动勾上。
-              </p>
-            </div>
           </div>
         </section>
       </div>
@@ -420,15 +448,6 @@
       </header>
 
       <div class="modal-body worldbook-body">
-        <!-- 左：世界书列表 -->
-        <aside class="wb-side">
-          <div class="wb-side-actions">
-            <button id="btn-import-lorebook" class="btn btn-primary btn-sm" type="button">导入世界书</button>
-            <button id="btn-new-worldbook" class="btn btn-ghost btn-sm" type="button">新建</button>
-          </div>
-          <div id="wb-list" class="wb-list"></div>
-        </aside>
-
         <!-- 中：条目列表 -->
         <section class="wb-entries">
           <div id="wb-entries-empty" class="wb-empty">左边选一本书，或新建一本</div>
@@ -441,11 +460,29 @@
               <div class="wb-entries-actions">
                 <button id="btn-preview-wb" class="btn btn-ghost btn-sm" type="button">预览命中</button>
                 <button id="btn-new-entry" class="btn btn-ghost btn-sm" type="button">＋ 条目</button>
-                <button id="btn-bind-worldbook-3" class="btn btn-ghost btn-sm" type="button">绑定到会话</button>
-                <button id="btn-bind-worldbook-2" class="btn btn-ghost btn-sm" type="button">绑定到角色</button>
                 <button id="btn-del-worldbook" class="btn btn-danger btn-sm" type="button">删除本书</button>
               </div>
             </div>
+
+            <!-- 本书角色：从角色库复制进来的独立副本。
+                 和角色库里的那个角色互相独立，改哪边都不影响另一边。 -->
+            <div class="wb-chars">
+              <div class="wb-chars-head">
+                <span class="field-label">本书角色</span>
+                <div class="wb-chars-actions">
+                  <button id="btn-add-wb-chars" class="btn btn-ghost btn-sm" type="button">＋ 从角色库加入</button>
+                  <button id="btn-new-wb-char" class="btn btn-ghost btn-sm" type="button">＋ 新建</button>
+                </div>
+              </div>
+              <div id="wb-char-list" class="wb-char-list"></div>
+            </div>
+
+            <!-- 开场白：进这个世界时自动作为第一条消息 -->
+            <label class="field field-stack wb-opening-field">
+              <span class="field-label">开场白</span>
+              <textarea id="wb-opening" rows="3" spellcheck="false" placeholder="进这个世界时自动作为第一条消息。留空则让 AI 按设定现生成一段开局。"></textarea>
+            </label>
+
             <div id="wb-entry-list" class="wb-entry-list"></div>
           </div>
         </section>
@@ -562,17 +599,11 @@
             <option value="standard">标准 —— 只写对话和动作</option>
             <option value="inner">内心描写 —— 每轮附上角色的真实心理</option>
             <option value="god">上帝视角 —— 正文 + 心理 + 旁白</option>
-            <option value="custom">自定义 —— 自己写要求</option>
           </select>
           <span class="field-help">
             选好后会自动把格式要求加进提示词。「【心理】」「【旁白】」会被渲染成独立样式块，
             和正文区分开。
           </span>
-        </label>
-
-        <label id="p-custom-wrap" class="field field-stack hidden">
-          <span class="field-label">自定义叙述要求</span>
-          <textarea id="p-custom" rows="5" spellcheck="false" placeholder="例如：每次回复先用一段环境描写开场，再写对话，最后用「【心理】」写主角的内心活动。"></textarea>
         </label>
 
         <label class="check">
@@ -638,6 +669,75 @@
         <span id="memory-foot-hint" class="foot-hint">摘要只保存在你自己电脑上</span>
         <div class="foot-actions">
           <button id="btn-close-memory-2" class="btn btn-ghost" type="button">关闭</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 进入世界：先创建你自己的角色 ================= -->
+  <div id="player-modal" class="modal hidden">
+    <div class="modal-card player-card" role="dialog" aria-modal="true" aria-labelledby="player-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="player-title">创建你的角色</h2>
+          <p id="player-sub" class="modal-sub"></p>
+        </div>
+        <button id="btn-close-player" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="modal-body player-body">
+        <label class="field field-stack">
+          <span class="field-label">你的名字</span>
+          <input id="player-name" type="text" spellcheck="false" placeholder="例如 旅行者" />
+          <span class="field-help">这个世界里的人会这么称呼你，也会替换掉 <code>{{user}}</code>。</span>
+        </label>
+
+        <label class="field field-stack">
+          <span class="field-label">你的设定</span>
+          <textarea id="player-profile" rows="7" spellcheck="false" placeholder="你是谁、长什么样、什么来头、会什么……&#10;例如：来自异世界的旅人，背着一把用旧的长剑，对这个世界几乎一无所知，但学得很快。"></textarea>
+          <span class="field-help">
+            这段会作为「玩家角色」注入提示词，让 GM 知道主角是谁。<br />
+            留空也行，那样就只用名字。
+          </span>
+        </label>
+      </div>
+
+      <footer class="modal-foot">
+        <span class="foot-hint">进入世界后会自动打开 GM 模式</span>
+        <div class="foot-actions">
+          <button id="btn-cancel-player" class="btn btn-ghost" type="button">取消</button>
+          <button id="btn-start-play" class="btn btn-primary" type="button">开始游玩</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= 从角色库多选加入世界书 ================= -->
+  <div id="wb-char-picker" class="modal hidden">
+    <div class="modal-card wb-picker-card" role="dialog" aria-modal="true" aria-labelledby="wb-char-picker-title">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 id="wb-char-picker-title">从角色库加入</h2>
+          <p class="modal-sub">加入的是副本，之后两边各改各的，互不影响</p>
+        </div>
+        <button id="btn-close-wb-char-picker" class="icon-btn" type="button" title="关闭（Esc）" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+      <div class="modal-body wb-picker-body">
+        <div id="wb-char-picker-list" class="wb-picker-list"></div>
+      </div>
+      <footer class="modal-foot">
+        <span id="wb-char-picker-hint" class="foot-hint"></span>
+        <div class="foot-actions">
+          <button id="btn-cancel-wb-char-picker" class="btn btn-ghost" type="button">取消</button>
+          <button id="btn-confirm-wb-char-picker" class="btn btn-primary" type="button">加入</button>
         </div>
       </footer>
     </div>
