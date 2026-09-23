@@ -1,5 +1,71 @@
 # Barbara（原 Cyrene）优化更新日志
 
+## 2026-09 重构第一批：抽 data 层 + 刷新总线
+
+> 这一步**不改任何功能**，界面行为一个字节都没变 —— 431 条冒烟断言全绿。
+> 体检数据、目标目录和进度在 **[重构方案.md](重构方案.md)**。
+
+### 🧱 抽了 4 个纯逻辑模块到 `renderer/js/data/`
+
+| 文件 | 内容 |
+| --- | --- |
+| `providers.js` | 服务商 / 模型（`providers` / `currentEndpoint` / `ensureConvoEndpoint`）|
+| `panel.js` | 状态面板：解析 / 归一化 / 范围夹取 / 注入文本（437 行）|
+| `narration.js` | 叙述模式 / 推进节奏 / GM 规则文本（零依赖）|
+| `memory.js` | 分段记忆摘要：区间计算 / 提示词 / `generateSummary` |
+
+顺带新增 `core/panel-fields.js` —— 把「读 `window.PanelFields` 并检查」收成一处，
+以前每个要用它的模块都得抄一遍那段 window 检查。
+
+**`data/messages.js` 这次没做**：`buildApiMessages` 需要连带迁移 **14 处**代码
+（角色/世界书的各种小读取器、宏替换、示例对话解析…），而那些函数**同时被界面大量调用**，
+本质是「共享数据层」而不是纯逻辑 —— 硬塞进 `data/` 只会制造新耦合。
+正确顺序是先有 `data/library.js`，而那该和 `views/` 拆分一起规划。
+
+### 🔌 新增刷新总线（`views/refresh.js`）
+
+以前 8 个视图函数**焊在 `renderAll()` 里挨个调用** —— 于是 `renderAll` 认识所有视图、
+谁改完数据都得认识它。这是体检出的「19 对分区互相调用」里 7 对的源头，
+也正是 `views/` 一步都动不了的原因（前置没做）。
+
+现在视图在 `registerRefreshListeners()` 里登记一次，`renderAll()` 只负责广播：
+
+```js
+onRefresh(renderMessages);            // 谁想被重绘，自己登记
+refreshAll({ forceScroll: true });    // 要重绘时广播
+```
+
+- 调用顺序 = 登记顺序（和原来的绘制顺序一致：先会话列表、后消息）
+- 单个视图抛错不连累其他视图（以前一处笔误整个界面就不刷新了）
+- **新代码要重绘直接用 `refreshAll()`，不要再 import 别的视图模块**
+
+### 🧹 顺手合并了一对重复函数
+
+`importCards` / `importWorldbooks` 有 26 行逐行重复的流程
+（禁用按钮 → 解析 → 重发 id → 出错/取消/空内容兜底），还各自跑偏过一次：
+只有角色卡那边会在忙时改按钮文字。现在合并成 `pickImportFiles()`，
+世界书那边的按钮也统一成「导入中… → 导入世界书」。
+
+### 🐛 踩到的一个坑（记下来）
+
+**ES module 里 import 一个没有 `export` 的名字，整个模块图直接不执行** ——
+HTML 照常显示、控制台只有一行 SyntaxError，而冒烟测试的表现是
+**「90 秒超时」而不是失败断言**，日志里什么都看不到。
+最后靠一个小脚本抓 `console-message` 才定位到（漏了 `export` 而已）。
+
+### 📉 效果
+
+```
+renderer/js/main.js   7902 → 7169 行（首次净减少）
+renderer/js/data/     2 个 → 6 个文件
+renderer/js/views/    不存在 → 出现（refresh.js）
+冒烟测试              431/431 通过 · 控制台 0 报错
+```
+
+每一步都是独立的一次提交，要回退就 `git revert` 对应的那个。
+
+---
+
 ## 2026-09 状态面板：类型 / 范围 / 进度条 / 分组 / 剧情选项
 
 状态面板原来是「一堆 `字段：值` 的字符串」。这次给它补上了**类型和约束**，
