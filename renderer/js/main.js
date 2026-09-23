@@ -9,7 +9,8 @@
 //    ui/     通用界面件：提示条、确认框、主题、Markdown
 //    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id
 //    views/  一个功能一块（refresh.js 刷新总线、header.js 对话头部、
-//            player.js 玩家角色弹窗、memoryUi.js 记忆管理 + 存档点）
+//            perspectiveUi.js 视角设置、player.js 玩家角色弹窗、
+//            memoryUi.js 记忆管理 + 存档点）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
@@ -77,10 +78,6 @@ import {
 import {
   DEFAULT_NARRATION_MODE,
   DEFAULT_PACE_MODE,
-  NARRATION_MODES,
-  PACE_MODES,
-  convoNarrationMode,
-  convoPaceMode,
   gmRuleText,
   isGmMode,
   narrationInstruction,
@@ -104,6 +101,7 @@ import {
 } from './data/memory.js';
 import { onRefresh, refreshAll } from './views/refresh.js';
 import { renderHeader, initHeader } from './views/header.js';
+import { initPerspectiveUi } from './views/perspectiveUi.js';
 import {
   openPlayerModal,
   closePlayerModal,
@@ -1279,47 +1277,6 @@ function resetPanel() {
   renderAll();
   persistConversations(0);
   showToast('面板已清空，下一条带状态栏的回复会重新建立');
-}
-
-// ---------------------------------------------------------------------------
-//  视角设置 UI（叙述模式 + GM 模式）
-// ---------------------------------------------------------------------------
-
-function openPerspectiveModal() {
-  const convo = activeConvo();
-  if (!convo) {
-    showToast('当前没有会话', 'error');
-    return;
-  }
-
-  el.pNarration.value = convoNarrationMode(convo);
-  el.pPace.value = convoPaceMode(convo);
-  el.pGm.checked = isGmMode(convo);
-
-  el.perspectiveModal.classList.remove('hidden');
-}
-
-function closePerspectiveModal() {
-  el.perspectiveModal.classList.add('hidden');
-  el.input.focus();
-}
-
-/** 把面板里的设置写回会话；即时生效、即时保存 */
-function applyPerspectiveFromForm() {
-  const convo = activeConvo();
-  if (!convo) return;
-
-  const mode = el.pNarration.value;
-  convo.narrationMode = Object.prototype.hasOwnProperty.call(NARRATION_MODES, mode) ? mode : DEFAULT_NARRATION_MODE;
-
-  const pace = el.pPace.value;
-  convo.paceMode = Object.prototype.hasOwnProperty.call(PACE_MODES, pace) ? pace : DEFAULT_PACE_MODE;
-
-  convo.gmMode = el.pGm.checked;
-  convo.updatedAt = now();
-
-  renderHeader();
-  persistConversations(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -4579,13 +4536,8 @@ function bindEvents() {
   // 等 header 独立成模块之后再让它归位。
   el.btnSummarizeNow.addEventListener('click', summarizeNow);
 
-  // 视角设置（叙述模式 + GM 模式），改动即时生效
-  el.btnPerspective.addEventListener('click', openPerspectiveModal);
-
   // 建议条：点 ✕ 收起
   el.btnSuggestClose.addEventListener('click', hideSuggestions);
-  el.btnClosePerspective.addEventListener('click', closePerspectiveModal);
-  el.btnClosePerspective2.addEventListener('click', closePerspectiveModal);
 
   // 对话窗口外观：改完立即生效 + 落盘，所以没有「保存」按钮
   el.btnAppearance.addEventListener('click', openAppearanceModal);
@@ -4624,12 +4576,6 @@ function bindEvents() {
 
   el.btnPickBg.addEventListener('click', pickChatBackground);
   el.btnClearBg.addEventListener('click', () => persistAppearance({ chatBackground: '' }));
-  el.pNarration.addEventListener('change', applyPerspectiveFromForm);
-  el.pPace.addEventListener('change', applyPerspectiveFromForm);
-  el.pGm.addEventListener('change', applyPerspectiveFromForm);
-  el.perspectiveModal.addEventListener('click', (event) => {
-    if (event.target === el.perspectiveModal) closePerspectiveModal();
-  });
 
   // 世界书 → 切到世界书列表页
   el.btnWorldbooks.addEventListener('click', () => showView('worldbooks'));
@@ -6467,6 +6413,8 @@ async function init() {
   // 必须在第一次 renderAll 之前登记 —— 否则首屏一个视图都不会画。
   // 各功能模块的事件绑定也在这一步完成（它们的 init 里带着自己的登记）。
   registerRefreshListeners();
+  // 只绑事件、不参与整体重绘的模块
+  initPerspectiveUi();
 
   const config = await api.getSettings();
   state.settings = config.settings;
