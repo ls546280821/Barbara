@@ -1,5 +1,54 @@
 # Barbara（原 Cyrene）优化更新日志
 
+## 2026-09 重构第三批：views 一次拆掉 4 个模块
+
+> 同样**不改任何功能** —— 431 条冒烟断言全绿，控制台 0 报错。
+> 进度在 **[重构方案.md](重构方案.md)** §六。
+
+### 本批拆了什么
+
+| 新文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/memoryUi.js` | 508 | 记忆管理（指示器 / 摘要增删改 / 清空）+ 存档点（存 / 读 / 删）|
+| `views/header.js` | 102 | 对话头部（标题 / 那行 Meta / 提示 / 用量）|
+| `views/perspectiveUi.js` | 78 | 视角设置弹窗（叙述模式 / 推进节奏 / GM）|
+
+外加两块地基层：`data/library.js` 补 `characterForConvo` / `convoWorldbookIds`，
+`data/memory.js` 补「运行态」`summarizingConvos` / `summaryFailures` 和 `charNameForSummary`
+—— 都是两头（入口的后台调度、视图的记忆面板）都要用的东西，**沉到 data 层谁都不用认识谁**。
+
+### 🔀 顺序和原计划不一样：`header` 得先拆
+
+`summarizeNow`（记忆）和 `applyPerspectiveFromForm`（视角）都要调 `renderHeader()`。
+header 不独立出去，搬这两个模块就会造成 views → main 的反向依赖。
+所以先拆了 `header` —— 它只依赖数据层、不认识任何视图，**可以被别的视图单向 import**
+（「依赖方向只能向下」防的是**循环**，不是一切跨视图调用）。
+
+### 🧩 记忆和存档点必须住一起
+
+两者物理上共用 `#memory-modal`（上面摘要列表、下面存档点）：`renderMemoryModal`
+要调 `renderCheckpoints` 画下半截，存档点的存 / 读 / 删又要回头重画整个弹窗 ——
+双向调用。拆成两个模块就是两个视图互相 import，所以合成一个 508 行的 `memoryUi.js`
+（「每块 300~350 行」的目标在这儿让位于「不许循环」）。
+
+### 🔌 接线方式定下来了
+
+`registerRefreshListeners()` 里改成调用各模块的 `initXxx()`，**登记仍在原位** ——
+绘制顺序和以前完全一致。`initXxx()` 兼做「绑事件 + 登记重绘」；只绑事件、不登记重绘的
+（如 `perspectiveUi`）在 `init()` 里单独调用。
+
+### ⏸ 还留在 `main.js` 的跨层动作
+
+`startWorldPlay` / `generateWorldOpening`（要 `createConvo`、`seed*`、`renderMessages`）、
+`maybeSummarize` / `summarizeNow`（要 `renderHeader` —— 现在其实已经可以搬了）。
+
+### 📉 规模
+
+| | 之前 | 现在 |
+| --- | ---: | ---: |
+| `renderer/js/main.js` | 7169 | **6476** |
+| `renderer/js/views/` | 1 个文件 | 5 个 |
+
 ## 2026-09 重构第二批：views 开始拆（先补地基）
 
 > 同样**不改任何功能** —— 431 条冒烟断言全绿，控制台 0 报错。
