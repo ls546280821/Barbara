@@ -123,7 +123,6 @@ export const el = {
   btnSaveChar: $('btn-save-char'),
   btnExportChar: $('btn-export-char'),
   btnExportConvo: $('btn-export-convo'),
-  btnExportWb: $('btn-export-wb'),
   btnAddAttr: $('btn-add-attr'),
   charEmpty: $('char-empty'),
   charForm: $('char-form'),

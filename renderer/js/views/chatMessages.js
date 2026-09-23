@@ -38,7 +38,7 @@ export function setOpeningBusy(id) {
   openingBusyId = id;
 }
 
-function messageNode(message, index, character, labels) {
+function messageNode(message, index, character, labels, ctx) {
   const isUser = message.role === 'user';
   const isError = message.role === 'error';
   // 角色只用来标识助手那一侧。用户消息和错误提示绝不能套角色的头像和名字，
@@ -137,7 +137,7 @@ function messageNode(message, index, character, labels) {
     //   · 选项已经变成可点的按钮了，原文留着只会吵。
     // （换候选时靠面板里的输入框看当前值，不靠正文。）
     content.innerHTML = renderMarkdown(
-      cleanAssistantText(message.content, convoPanelFields(activeConvo()))
+      cleanAssistantText(message.content, ctx.panelFields)
     );
   }
 
@@ -185,8 +185,7 @@ function messageNode(message, index, character, labels) {
     actions.appendChild(regen);
 
     // 「继续」只对最后一条有意义 —— 中间的回复后面早就接上别的话了
-    const convo = activeConvo();
-    const isLast = !!convo && index === convo.messages.length - 1;
+    const isLast = index === ctx.lastIndex;
     if (isLast && String(message.content || '').trim()) {
       const cont = document.createElement('button');
       cont.className = 'mini-btn';
@@ -296,13 +295,18 @@ export function renderMessages(options) {
     return;
   }
 
+  // 每条消息都要用的几样东西，在循环外算一次 —— 以前是每条各算一遍
+  const labels = {
+    user: convoUserName(convo),
+    assistant: speakerName(convo)
+  };
+  const ctx = {
+    panelFields: convoPanelFields(convo),
+    lastIndex: convo.messages.length - 1
+  };
+
   convo.messages.forEach((message, index) => {
-    el.messages.appendChild(
-      messageNode(message, index, character, {
-        user: convoUserName(convo),
-        assistant: speakerName(convo)
-      })
-    );
+    el.messages.appendChild(messageNode(message, index, character, labels, ctx));
   });
 
   scrollToBottom(!!opts.forceScroll);

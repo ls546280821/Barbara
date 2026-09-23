@@ -45,11 +45,6 @@ export function markWorldbooksLoaded() {
   worldbooksLoaded = true;
 }
 
-/** 世界书是否已经读进来了（「存角色时要不要捎上 worldbooks」靠它判断） */
-export function areWorldbooksLoaded() {
-  return worldbooksLoaded;
-}
-
 /**
  * 把当前角色库写回磁盘。
  *

@@ -194,8 +194,16 @@ export function initAppearance() {
     persistAppearance({ chatFontSize: Number(el.appearanceFontSize.value) });
   });
 
-  // 加粗颜色：色盘选的直接生效；手填的等回车/失焦再认
+  // 加粗颜色：和字号一个道理 —— 色盘拖动时 input 每帧都触发，
+  // 只预览不落盘（不然拖一次色盘要写几十次配置文件），松手（change）才落盘。
+  // 手填的等回车/失焦再认
   el.appearanceBoldColor.addEventListener('input', () => {
+    const hex = el.appearanceBoldColor.value;
+    state.settings = { ...(state.settings || {}), chatBoldColor: hex };
+    el.appearanceBoldColorText.value = hex;
+    applyChatAppearance();
+  });
+  el.appearanceBoldColor.addEventListener('change', () => {
     persistAppearance({ chatBoldColor: el.appearanceBoldColor.value });
   });
   el.appearanceBoldColorText.addEventListener('change', () => {
