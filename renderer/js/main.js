@@ -10,15 +10,19 @@
 //    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id
 //    views/  一个功能一块（refresh.js 刷新总线、header.js 对话头部、
 //            perspectiveUi.js 视角设置、panelUi.js 状态面板、
-//            player.js 玩家角色弹窗、memoryUi.js 记忆管理 + 存档点）
+//            player.js 玩家角色弹窗、memoryUi.js 记忆管理 + 存档点、
+//            worldbookList.js 世界书列表页）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
 //    · 依赖方向只能向下：core ← ui ← data ← views ← 入口
-//    · 别让两个功能模块互相 import。刷新总线已经就位（views/refresh.js）：
-//      renderAll 不再挨个点名视图，谁想被重绘就在 registerRefreshListeners
-//      里登记一次，拆 views 时把登记语句跟着搬进各自模块。
-//      **新代码要重绘直接用 refreshAll()，不要再 import 别的视图模块。**
+//    · 别让两个功能模块互相 import（防的是**循环**）。刷新总线已经就位
+//      （views/refresh.js）：renderAll 不再挨个点名视图，谁想被重绘就在
+//      registerRefreshListeners 里登记一次，拆 views 时把登记语句跟着搬进各自模块。
+//      **要重绘用 refreshAll()，不要为了重绘去 import 别的视图模块。**
+//      单向 import 一个「只依赖 core/data、不认识任何视图」的展示层是允许的
+//      （例如 worldbookList 借 player 的弹窗）；视图需要入口层的动作时用注入
+//      —— initXxx({ theAction })，由入口层把函数传进来。
 // ============================================================================
 
 import { CONFIG } from './core/config.js';
@@ -110,6 +114,7 @@ import {
 } from './views/player.js';
 import { initMemoryUi, renderMemoryModal } from './views/memoryUi.js';
 import { initPanelUi, renderPanel } from './views/panelUi.js';
+import { initWorldbookList, renderWorldbookPage } from './views/worldbookList.js';
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -901,6 +906,10 @@ function registerRefreshListeners() {
   initMemoryUi(); // → onRefresh(renderMemoryIndicator)
   onRefresh(renderMessages);
   onRefresh(refreshLibraryPage);
+  // 世界书列表页要「点编辑 = 打开世界书编辑器」，而编辑器开关属于入口层的编排
+  // （要设 editingWorldbookId，那是编辑器弹窗的状态）。所以注入进去。
+  // 它自己不登记重绘 —— 列表页的重绘由上面的 refreshLibraryPage 按当前视图分发。
+  initWorldbookList({ openEditor: editWorldbookFromPage });
 }
 
 // ---------------------------------------------------------------------------
@@ -3901,6 +3910,20 @@ async function persistLibrary() {
 //  不再往已经开始的对话上挂。
 // ---------------------------------------------------------------------------
 
+/**
+ * 打开编辑器去编辑某一本。这是列表页「编辑」按钮的动作，由入口层注入给列表页。
+ *
+ * 它留在这儿而不是跟着列表页走：要设 editingWorldbookId —— 那是**编辑器弹窗**
+ * 的状态，只有这一区在读（currentWorldbook / selectWorldbook / openWorldbooksModal）。
+ * 列表页不需要知道有「当前选中的是哪本」这回事。
+ */
+function editWorldbookFromPage(id) {
+  const book = worldbookById(id);
+  if (!book) return;
+  editingWorldbookId = id;
+  openWorldbooksModal();
+}
+
 function openWorldbooksModal() {
   // 角色库可能没开着（侧边栏可以直接进世界书），stashCharForm 内部会自己判断
   stashCharForm();
@@ -4656,57 +4679,6 @@ function showView(name) {
   if (name === 'chars') renderCharacterPage();
   else if (name === 'worldbooks') renderWorldbookPage();
   else el.input.focus();
-}
-
-// ---------------------------------------------------------------------------
-//  世界书列表页
-//  世界书是「一个世界」：从这里点「游玩」进入，进去前先创建你自己的角色。
-//  它不再是「给某个对话挂上去的设定」—— 绑到已经开始的对话上那套已经拿掉了。
-// ---------------------------------------------------------------------------
-
-function renderWorldbookPage() {
-  const list = worldbooks();
-  renderListPage({
-    grid: el.wbPageGrid,
-    empty: el.wbPageEmpty,
-    sub: el.wbPageSub,
-    subText: list.length
-      ? `共 ${list.length} 个世界 · 点「游玩」进入，进去前先创建你自己的角色`
-      : '导入酒馆的 lorebook，或自己写一个世界',
-    items: list,
-    card: worldbookCard
-  });
-}
-
-/**
- * 一张世界书卡片：世界名 + 设定条数 / 角色数 + 编辑/游玩
- *
- * 这里**故意不做**角色卡那种悬停删除 `×`：
- * 一本书里可能攒了很多条目和角色副本，删掉找不回来，
- * 所以删除入口刻意留在编辑器里（「删除本书」）—— 得先点进去、看得见全书内容再删。
- * 角色卡可以快捷删，是因为单张角色卡的信息量小、重建成本低。
- */
-function worldbookCard(book) {
-  const charCount = worldbookCharacters(book).length;
-
-  return card({
-    title: book.name,
-    sub: charCount ? `${book.entries.length} 条设定 · ${charCount} 个角色` : `${book.entries.length} 条设定`,
-    avatarText: '世',
-    avatarClass: 'worldbook-avatar',
-    actions: [
-      button({ class: 'btn btn-ghost btn-sm', text: '编辑', onClick: () => editWorldbookFromPage(book.id) }),
-      button({ class: 'btn btn-primary btn-sm', text: '游玩', onClick: () => openPlayerModal(book.id) })
-    ]
-  });
-}
-
-/** 点「编辑」：打开世界书编辑器（它现在只编辑这一本） */
-function editWorldbookFromPage(id) {
-  const book = worldbookById(id);
-  if (!book) return;
-  editingWorldbookId = id;
-  openWorldbooksModal();
 }
 
 // ---------------------------------------------------------------------------
