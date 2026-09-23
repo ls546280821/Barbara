@@ -22,6 +22,11 @@ export function characterById(id) {
   return characters().find((c) => c.id === id) || null;
 }
 
+/** 当前会话绑定的角色（没绑就是 null，走通用助手） */
+export function characterForConvo(convo) {
+  return convo ? characterById(convo.characterId) : null;
+}
+
 /**
  * 读角色卡上的属性（容错老数据 / 导入的角色卡）。
  *

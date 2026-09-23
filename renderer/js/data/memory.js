@@ -18,6 +18,7 @@ import { api } from '../core/api.js';
 import { uid } from '../core/util.js';
 import { stripPanelLines } from './panel.js';
 import { ensureConvoEndpoint } from './providers.js';
+import { characterForConvo } from './library.js';
 
 // 未覆盖的消息达到这个数就压一段。一轮 = 一问一答 = 2 条，
 // 也就是大约每 12 轮压一段。
@@ -142,6 +143,24 @@ export function pendingSummaryRange(convo) {
   const start = Math.min(covered, messages.length);
   const pending = messages.slice(start);
   return { messages, start, pending, covered };
+}
+
+/**
+ * 摘要的「运行态」。
+ *
+ * 放在 data 层而不是某个视图里，是因为两头都要用它：后台调度（main.js 的
+ * maybeSummarize）判断该不该压，记忆面板（views/memoryUi.js）判断有没有
+ * 正在跑、好禁用按钮。谁都不必 import 谁。
+ */
+// 正在压缩的会话 id，防止同一会话并发触发
+export const summarizingConvos = new Set();
+// 会话 id -> 连续失败次数
+export const summaryFailures = new Map();
+
+/** 摘要里怎么称呼「对面那位」—— 没绑角色就当作通用助手 */
+export function charNameForSummary(convo) {
+  const character = characterForConvo(convo);
+  return character ? character.name : '你';
 }
 
 /** 调一次模型生成摘要；失败或返回异常时返回 null */
