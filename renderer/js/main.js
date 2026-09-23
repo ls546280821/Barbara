@@ -30,7 +30,6 @@ import { uid, now, activeConvo } from './core/util.js';
 import {
   clampFieldValue,
   normalizePanelField,
-  normalizePanelFields,
   groupPanelFields,
   fieldProgress,
   describePanelField,
@@ -47,6 +46,14 @@ import { h, button, card, clear, renderListPage } from './ui/build.js';
 import { persistConversations } from './data/persist.js';
 import { reissueImportedIds } from './data/library-reissue.js';
 import { providers, providerById, ensureConvoEndpoint, currentEndpoint } from './data/providers.js';
+import {
+  characters,
+  characterById,
+  characterAttrs,
+  worldbooks,
+  worldbookById,
+  worldbookCharacters
+} from './data/library.js';
 import {
   cleanAssistantText,
   convoPanel,
@@ -119,10 +126,6 @@ let editingEntryId = null; // 当前正在编辑的条目
 //  会话可以绑定一个角色；绑了角色的会话不再使用「设置」里的全局人设。
 // ---------------------------------------------------------------------------
 
-function characters() {
-  return Array.isArray(state.characters) ? state.characters : [];
-}
-
 // 导入时重发 id 用的自增序号：同一毫秒里连导几次也不会撞车
 let importSeq = 0;
 
@@ -147,26 +150,12 @@ function isCharDraft() {
   return !!charDraft && editingCharacterId === charDraft.character.id;
 }
 
-function characterById(id) {
-  if (!id) return null;
-  return characters().find((c) => c.id === id) || null;
-}
-
 /** 当前会话绑定的角色（没绑就是 null，走通用助手） */
 function characterForConvo(convo) {
   return convo ? characterById(convo.characterId) : null;
 }
 
 // --- 世界书 ---
-
-function worldbooks() {
-  return Array.isArray(state.worldbooks) ? state.worldbooks : [];
-}
-
-function worldbookById(id) {
-  if (!id) return null;
-  return worldbooks().find((w) => w.id === id) || null;
-}
 
 /** 会话绑定了哪些世界书（id 列表，容错老数据） */
 function convoWorldbookIds(convo) {
@@ -4446,10 +4435,6 @@ function selectEntry(id) {
 //  和角色库里的那个角色互相独立 —— 改这边不影响那边，反之亦然。
 // ---------------------------------------------------------------------------
 
-function worldbookCharacters(book) {
-  return book && Array.isArray(book.characters) ? book.characters : [];
-}
-
 /** 副本的 id 单独一个前缀，和角色库、会话的 id 不会看混 */
 function newWorldbookCharId() {
   return `wc${uid()}`;
@@ -6290,18 +6275,6 @@ let charAttrs = [];
 
 // 性别是选择框，只认这几个值（导入的卡会在主进程先归一化过来）
 const GENDERS = ['男', '女', '其他'];
-
-/**
- * 读角色卡上的属性（容错老数据 / 导入的角色卡）。
- *
- * 老数据只有 {name, value}，这里走一遍共享归一化，于是 type/min/max/hint
- * 缺省都补成合理的值（type 默认 text）。范围/hint 是可选增强 ——
- * 没有它们的属性行为和以前完全一样。
- */
-function characterAttrs(character) {
-  if (!character || !Array.isArray(character.attributes)) return [];
-  return normalizePanelFields(character.attributes);
-}
 
 /** 编辑器里的字段类型选择框（文本 / 数值 / 列表） */
 const ATTR_TYPES = [
