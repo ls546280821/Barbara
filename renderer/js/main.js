@@ -7,15 +7,16 @@
 //  这里还在往 ES module 拆，分层是：
 //    core/   底层：常量、状态、DOM 引用、preload 桥、工具函数
 //    ui/     通用界面件：提示条、确认框、主题、Markdown
-//    data/   纯逻辑：服务商/模型、持久化、导入后重发 id
-//    views/  一个功能一块（**还没开始搬**）
+//    data/   纯逻辑：服务商/模型、面板、叙述规则、摘要、持久化、导入后重发 id
+//    views/  一个功能一块（目前只有 refresh.js —— 刷新总线）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
 //    · 依赖方向只能向下：core ← ui ← data ← views ← 入口
-//    · 别让两个功能模块互相 import。现在 renderAll() 被调用二十多次、
-//      是循环依赖的主要来源；动手拆 views 之前，先把它换成一个「刷新总线」
-//      （谁想被重绘就自己登记），否则会切出一堆循环 import。
+//    · 别让两个功能模块互相 import。刷新总线已经就位（views/refresh.js）：
+//      renderAll 不再挨个点名视图，谁想被重绘就在 registerRefreshListeners
+//      里登记一次，拆 views 时把登记语句跟着搬进各自模块。
+//      **新代码要重绘直接用 refreshAll()，不要再 import 别的视图模块。**
 // ============================================================================
 
 import { CONFIG } from './core/config.js';
@@ -90,6 +91,7 @@ import {
   pendingSummaryRange,
   generateSummary
 } from './data/memory.js';
+import { onRefresh, refreshAll } from './views/refresh.js';
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -936,6 +938,12 @@ function renderMessages(options) {
   scrollToBottom(!!opts.forceScroll);
 }
 
+/**
+ * 全量重绘。这里**不再挨个点名视图** —— 具体画哪些由 views/refresh.js 的
+ * 登记表决定（见 registerRefreshListeners）。以前这份名单焊死在这里，
+ * 于是 renderAll 认识所有视图、谁改完数据都得认识它，
+ * 那是「19 对分区互相调用」里最主要的来源。
+ */
 function renderAll(options) {
   // 建议是「针对某个会话的当前局面」给的 —— 换了会话就不该继续挂着
   const convoNow = activeConvo();
@@ -943,16 +951,30 @@ function renderAll(options) {
     hideSuggestions();
   }
 
-  renderConvoList();
-  renderHeader();
-  renderModelSwitch();
-  syncPanelVisibilityForConvo(activeConvo());
-  renderPanel();
-  renderMemoryIndicator();
-  renderMessages(options);
-  // 停在列表页时也要跟着刷新（改名、删除、导入都会走到这里）
+  refreshAll(options);
+}
+
+/** 停在图书区那两个列表页时也要跟着刷新（改名、删除、导入都会走到这里） */
+function refreshLibraryPage() {
   if (currentView === 'chars') renderCharacterPage();
   else if (currentView === 'worldbooks') renderWorldbookPage();
+}
+
+/**
+ * 登记「谁需要被重绘」。顺序 = 绘制顺序，和以前 renderAll 里的调用顺序一致。
+ *
+ * 这八行是 views/ 拆分的接线板：等各功能搬进自己的文件之后，登记语句跟着
+ * 搬过去，renderAll / refreshAll 谁都不用认识。
+ */
+function registerRefreshListeners() {
+  onRefresh(renderConvoList);
+  onRefresh(renderHeader);
+  onRefresh(renderModelSwitch);
+  onRefresh(() => syncPanelVisibilityForConvo(activeConvo()));
+  onRefresh(renderPanel);
+  onRefresh(renderMemoryIndicator);
+  onRefresh(renderMessages);
+  onRefresh(refreshLibraryPage);
 }
 
 // ---------------------------------------------------------------------------
@@ -7084,6 +7106,8 @@ async function importWorldbooks() {
 
 async function init() {
   bindEvents();
+  // 必须在第一次 renderAll 之前登记 —— 否则首屏一个视图都不会画
+  registerRefreshListeners();
 
   const config = await api.getSettings();
   state.settings = config.settings;
