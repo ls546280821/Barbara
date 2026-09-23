@@ -7,8 +7,8 @@
 //  这里还在往 ES module 拆，分层是：
 //    core/   底层：常量、状态、DOM 引用、preload 桥、工具函数
 //    ui/     通用界面件：提示条、确认框、主题、Markdown
-//    data/   纯逻辑：服务商/模型、面板、叙述规则、摘要、持久化、导入后重发 id
-//    views/  一个功能一块（目前只有 refresh.js —— 刷新总线）
+//    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id
+//    views/  一个功能一块（refresh.js 刷新总线、player.js 玩家角色弹窗）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
@@ -99,6 +99,12 @@ import {
   generateSummary
 } from './data/memory.js';
 import { onRefresh, refreshAll } from './views/refresh.js';
+import {
+  openPlayerModal,
+  closePlayerModal,
+  applyPlayerCharChoice,
+  getPlayingBook
+} from './views/player.js';
 
 // 世界书有没有成功从磁盘读进来。
 // 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
@@ -5500,131 +5506,20 @@ function editWorldbookFromPage(id) {
 }
 
 // ---------------------------------------------------------------------------
-//  进入世界：先创建玩家自己的角色
+//  进入世界：开始游玩（编排）
+
+//  弹窗本身（填名字 / 挑一张角色卡当自己）搬去了 views/player.js。
+//  这里留着「按下开始之后」的事：建会话、种状态面板、切到对话视图、必要时生成开局。
+//  它跨了会话管理 / 状态面板 / 视图切换好几个分区，所以暂时留在入口层 ——
+//  等 createConvo 进 data/conversations.js、seed* 进 data/panel.js 之后再一起搬。
 // ---------------------------------------------------------------------------
-
-let playingBookId = null;
-
-/**
- * 把角色卡拼成「玩家角色」的设定文本。
- * 主角是 GM 要伺候的对象，所以描述和性格都要给到，不然它只知道一个名字。
- */
-function playerProfileFromCharacter(character) {
-  if (!character) return '';
-  const bits = [];
-  const desc = String(character.description || '').trim();
-  const personality = String(character.personality || '').trim();
-  const scenario = String(character.scenario || '').trim();
-  if (desc) bits.push(desc);
-  if (personality) bits.push(`【性格】${personality}`);
-  if (scenario) bits.push(`【背景】${scenario}`);
-  return bits.join('\n');
-}
-
-/** 下拉框下面那行预览：让「会被带进世界的是什么」一眼可见 */
-function updatePlayerCharPreview() {
-  const host = el.playerCharPreview;
-  if (!host) return;
-
-  const character = characterById(el.playerChar.value);
-  if (!character) {
-    host.innerHTML = '';
-    host.classList.add('hidden');
-    return;
-  }
-
-  const attrs = characterAttrs(character);
-
-  host.innerHTML = '';
-  if (character.avatar) {
-    const img = document.createElement('img');
-    img.src = character.avatar;
-    img.alt = '';
-    host.appendChild(img);
-  }
-
-  const text = document.createElement('span');
-  text.textContent = attrs.length
-    ? `会带上 ${attrs.length} 个属性：${attrs.map((a) => a.name).join('、')}`
-    : '这张卡没有定义属性，只会带上名字和设定';
-  host.appendChild(text);
-
-  host.classList.remove('hidden');
-}
-
-/** 把「用角色卡当自己」的下拉填好（角色库为空时整块隐藏） */
-function renderPlayerCharOptions() {
-  if (!el.playerCharField) return;
-
-  const list = characters();
-  el.playerCharField.classList.toggle('hidden', !list.length);
-
-  el.playerChar.innerHTML = '';
-  const none = document.createElement('option');
-  none.value = '';
-  none.textContent = list.length ? '（自己写一个）' : '角色库还是空的';
-  el.playerChar.appendChild(none);
-
-  for (const c of list) {
-    const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = c.name;
-    el.playerChar.appendChild(opt);
-  }
-
-  el.playerChar.value = '';
-  updatePlayerCharPreview();
-}
-
-/**
- * 选了一张角色卡：把名字和设定填到下面的输入框里。
- * 注意是「填」不是「锁」—— 填完还能改，改了就以你改的为准。
- */
-function applyPlayerCharChoice() {
-  const character = characterById(el.playerChar.value);
-  if (character) {
-    el.playerName.value = character.name;
-    el.playerProfile.value = playerProfileFromCharacter(character);
-  } else {
-    // 选回「自己写一个」：把名字还原成设置里的默认值，设定清空
-    el.playerName.value = (state.settings && state.settings.userName) || '';
-    el.playerProfile.value = '';
-  }
-  updatePlayerCharPreview();
-}
-
-function openPlayerModal(bookId) {
-  const book = worldbookById(bookId);
-  if (!book) return;
-
-  playingBookId = bookId;
-
-  if (el.playerTitle) el.playerTitle.textContent = `进入「${book.name}」`;
-  if (el.playerSub) {
-    el.playerSub.textContent = '先给这个世界里的自己一个身份，然后就可以开始了';
-  }
-
-  // 每次打开都重列一遍角色库（可能刚加过新角色），并回到「自己写一个」
-  renderPlayerCharOptions();
-  el.playerName.value = (state.settings && state.settings.userName) || '';
-  el.playerProfile.value = '';
-
-  el.playerModal.classList.remove('hidden');
-  el.playerName.focus();
-  el.playerName.select();
-}
-
-function closePlayerModal() {
-  el.playerModal.classList.add('hidden');
-  playingBookId = null;
-}
 
 /**
  * 「开始游玩」：建一个会话，把这个世界装上，并存下玩家自己的角色。
  * 世界模型本来就应该由 GM 叙述，所以顺手把 GM 模式打开。
  */
 function startWorldPlay() {
-  const book = worldbookById(playingBookId);
+  const book = getPlayingBook();
   if (!book) return;
 
   const name = el.playerName.value.trim();
