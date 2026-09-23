@@ -1,5 +1,63 @@
 # Barbara（原 Cyrene）优化更新日志
 
+## 2026-09 重构第六批：拆分世界书编辑器
+
+> 同样**不改任何功能** —— 431 条冒烟断言全绿、控制台 0 报错；
+> 改前改后的日志 diff 只有一行计数（写操作 88 → 87，是 `persistConversations`
+> 的防抖把两次调用并进同一个 350ms 窗口，前几批也出现过同一个现象）。
+> 进度在 **[重构方案.md](重构方案.md)** §六。
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/worldbook.js` | 751 | 世界书编辑器：选书 / 条目增删改 / 本书角色副本 / 命中预览 / 导入导出 |
+
+### 🔗 原计划的 `worldbookChars.js` 并进来了，不该单独存在
+
+`selectWorldbook`（选书）要调 `renderWorldbookChars`（画本书角色那一排），
+而「移除副本」又要回头重画整个列表 —— **双向调用**，拆成两个模块就是互相 import。
+所以两者合并，751 行是目前最大的视图模块。这和上一批「记忆 + 存档点共用
+`#memory-modal`」是同一类问题：**共用容器的两块 UI 不能拆，行数目标让位于不许循环**。
+
+### 🧱 顺带剥出三块「两头都要用」的东西
+
+搬的时候发现它们不属于任何一个视图，谁用了都得反过来 import 对方：
+
+| 沉到哪 | 什么 | 为什么两头都要用 |
+| --- | --- | --- |
+| `data/library.js` | `worldbookPayload` | 角色卡导出要塞 `character_book` 字段，编辑器要导出整本 |
+| `data/library.js` | `newWorldbookCharId` | 「加入副本」发一个 id，角色编辑器在「世界书作用域」下起草角色也发一个 |
+| `data/library.js` | `WORLDBOOK_SCAN_DEPTH` / `recursiveDepthSetting` | 请求组装（`matchWorldbookSection`）和编辑器的「预览命中」都要 |
+| `data/persist.js` | `persistLibrary` + `worldbooksLoaded` 标志 | 世界书编辑器 / 角色编辑器 / 导入三头都在写盘；「读没读到」和「能不能写」是同一个约束的两面 |
+| `data/export.js` | `saveExport` | 角色卡 / 对话 / 世界书三条导出链路共用的收尾（调保存框 + 报结果）|
+| `core/util.js` | `safeFileName` | 同样是三条导出链路共用 |
+
+> `saveExport` 放 `data/` 而不是 `core/`：它要用 `showToast`（ui 层），
+> 而 `core/` 不能再往上依赖 `ui/` —— 分层是 `core ← ui ← data ← views ← 入口`。
+
+### 💉 注入给编辑器的是五个入口层动作
+
+编辑器里有两处必须由入口层编排：**切角色编辑器作用域再打开角色编辑器弹窗**，
+以及**导入世界书**（要同时动角色库、世界书列表页、角色列表页）。
+做法仍是 `initWorldbook({ ... })`，视图不向上 import：
+
+```js
+initWorldbook({
+  importBooks: importWorldbooks,          // 导入（入口层跨视图编排）
+  stashDraft: () => stashCharForm(),      // 导入前先把角色编辑器表单写回内存
+  openInBook: (id) => { charEditorScope = 'worldbook'; editingCharacterId = id; openCharsModal(); },
+  draftInBook: () => { charEditorScope = 'worldbook'; startCharDraft(); },
+  releaseScope: () => { if (charEditorScope === 'worldbook') charEditorScope = 'library'; }
+});
+```
+
+> `charEditorScope` / `editingCharacterId` 这对状态目前还在入口层。
+> 它们真正该沉到数据层 —— 但那要动 30+ 处调用点，属于「拆 `characterEditor`」
+> 那一刀该干的事，混在这一刀里就不是「只搬移」了。**留到下一批一体处理。**
+
+### 📉 main.js 6099 → 5363 行（本批 -736，含删掉的 767 行旧定义与新增 import）
+
 ## 2026-09 重构第五批：拆分世界书列表页
 
 > 同样**不改任何功能**。这一刀验证得最干净：改前改后的测试日志 **diff 零行** ——

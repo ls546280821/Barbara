@@ -7,11 +7,11 @@
 //  这里还在往 ES module 拆，分层是：
 //    core/   底层：常量、状态、DOM 引用、preload 桥、工具函数
 //    ui/     通用界面件：提示条、确认框、主题、Markdown
-//    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id
+//    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id、导出收尾
 //    views/  一个功能一块（refresh.js 刷新总线、header.js 对话头部、
 //            perspectiveUi.js 视角设置、panelUi.js 状态面板、
 //            player.js 玩家角色弹窗、memoryUi.js 记忆管理 + 存档点、
-//            worldbookList.js 世界书列表页）
+//            worldbookList.js 世界书列表页、worldbook.js 世界书编辑器）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
@@ -29,7 +29,7 @@ import { CONFIG } from './core/config.js';
 import { api } from './core/api.js';
 import { state } from './core/state.js';
 import { el } from './core/dom.js';
-import { uid, now, activeConvo } from './core/util.js';
+import { uid, now, activeConvo, safeFileName } from './core/util.js';
 // 面板字段的类型/范围/变化规则。主进程 require('../../main/panel-fields.js')
 // 加载的是同一个文件，所以「范围怎么夹」两边跑的是同一份代码。
 // 那套「读 window.PanelFields」的桥在 core/panel-fields.js 里。
@@ -49,7 +49,8 @@ import { applyTheme, toggleTheme } from './ui/theme.js';
 import { esc, renderMarkdown } from './ui/markdown.js';
 import { h, button, card, clear, renderListPage } from './ui/build.js';
 
-import { persistConversations } from './data/persist.js';
+import { persistConversations, persistLibrary, markWorldbooksLoaded, areWorldbooksLoaded } from './data/persist.js';
+import { saveExport } from './data/export.js';
 import { reissueImportedIds } from './data/library-reissue.js';
 import { providers, providerById, ensureConvoEndpoint, currentEndpoint } from './data/providers.js';
 import {
@@ -60,7 +61,11 @@ import {
   worldbooks,
   worldbookById,
   worldbookCharacters,
-  convoWorldbookIds
+  newWorldbookCharId,
+  convoWorldbookIds,
+  worldbookPayload,
+  WORLDBOOK_SCAN_DEPTH,
+  recursiveDepthSetting
 } from './data/library.js';
 import {
   cleanAssistantText,
@@ -115,12 +120,18 @@ import {
 import { initMemoryUi, renderMemoryModal } from './views/memoryUi.js';
 import { initPanelUi, renderPanel } from './views/panelUi.js';
 import { initWorldbookList, renderWorldbookPage } from './views/worldbookList.js';
+import {
+  initWorldbook,
+  editWorldbookFromPage,
+  openWorldbookEditor,
+  renderWorldbookChars,
+  closeWorldbookCharPicker,
+  stashWorldbookForm,
+  currentWorldbook
+} from './views/worldbook.js';
 
-// 世界书有没有成功从磁盘读进来。
-// 读失败时绝不能把内存里的空列表当成「用户把书删光了」写回去 ——
-// 角色和世界书是同一次请求落盘的（saveCharacters 一次写两个文件），
-// 所以只要存一次角色，就会顺手把 worldbooks.json 抹掉。
-let worldbooksLoaded = false;
+// 世界书有没有成功从磁盘读进来 —— 这个标志和 persistLibrary 一起住在
+// data/persist.js 里（「读没读到」和「能不能写」是同一个约束的两面）。
 let editingProviderId = null; // 设置弹窗里当前正在编辑的服务商
 let editingCharacterId = null; // 角色库里当前正在编辑的角色
 // 角色编辑器的作用域：'library' = 角色库；'worldbook' = 当前世界书里的角色副本。
@@ -133,8 +144,8 @@ let charDraftWbEnabled = true;
 // 「新建角色」做出来的草稿：它先只活在编辑器里，不进任何列表、也不写磁盘，
 // 点了「保存角色」才真正被创建。关掉编辑器就等于放弃这次新建。
 let charDraft = null; // { character, scope, bookId }
-let editingWorldbookId = null; // 世界书弹窗里当前选中的世界书
-let editingEntryId = null; // 当前正在编辑的条目
+// 「世界书弹窗里当前选中哪本书 / 哪条条目」随世界书编辑器一起搬到了
+// views/worldbook.js —— 那是编辑器自己的状态，别处不需要知道。
 
 // ---------------------------------------------------------------------------
 //  角色（角色扮演）
@@ -167,18 +178,6 @@ function isCharDraft() {
 }
 
 // --- 世界书 ---
-
-/**
- * 扫一遍近期消息，把命中的世界书条目拼成注入块。
- * 匹配逻辑在主进程（那里才有书和角色数据），渲染层只负责拿结果。
- */
-const WORLDBOOK_SCAN_DEPTH = 6;
-
-/** 递归扫描最多连锁几层（设置里调，0 = 关掉递归） */
-function recursiveDepthSetting() {
-  const value = Number((state.settings || {}).worldbookRecursiveDepth);
-  return Number.isFinite(value) && value >= 0 && value <= 5 ? Math.floor(value) : 3;
-}
 
 /**
  * 这次请求实际要注入哪些世界书。
@@ -1431,12 +1430,6 @@ function closeAppearanceModal() {
 //  酒馆那边也认（角色卡是 v2 规范，世界书是 lorebook 规范）。
 // ---------------------------------------------------------------------------
 
-/** 文件名里不能出现的字符（Windows 最严），换成下划线 */
-function safeFileName(name) {
-  const base = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '_');
-  return base.slice(0, 60) || 'export';
-}
-
 /**
  * UTF-8 文本 → base64。
  * 不能用裸 btoa：它只吃 Latin-1，中文会直接抛错；先按 UTF-8 取字节再 base64。
@@ -1492,34 +1485,6 @@ function characterCardPayload(character) {
       }
     }
   };
-}
-
-/** 世界书导出成酒馆 lorebook 的形状（导入那边认的就是这个） */
-function worldbookPayload(book) {
-  const entries = {};
-  (book.entries || []).forEach((entry, index) => {
-    entries[String(index)] = {
-      uid: index,
-      comment: entry.title || '',
-      key: Array.isArray(entry.keys) ? entry.keys : [],
-      keysecondary: Array.isArray(entry.secondaryKeys) ? entry.secondaryKeys : [],
-      content: entry.content || '',
-      constant: entry.constant === true,
-      selective: Array.isArray(entry.secondaryKeys) && entry.secondaryKeys.length > 0,
-      selectiveLogic: entry.selectiveLogic || 'AND_ANY',
-      order: Number.isFinite(entry.order) ? entry.order : 100,
-      probability: Number.isFinite(entry.probability) ? entry.probability : 100,
-      disable: entry.enabled === false,
-      // 递归：写法两边都给 —— 酒馆认 excludeRecursion（true = 不参与递归），
-      // 我们自己认 recursive。这样导出的书酒馆能用，我们自己再导回来也不丢这个开关。
-      excludeRecursion: entry.recursive !== true,
-      recursive: entry.recursive === true,
-      matchWholeWords: entry.matchWholeWords === true,
-      caseSensitive: entry.caseSensitive === true
-    };
-  });
-
-  return { name: book.name || '未命名世界', description: book.description || '', entries };
 }
 
 /** 当前会话导出成 Markdown */
@@ -1610,24 +1575,6 @@ function avatarPngDataUrl(character) {
   });
 }
 
-/** 统一的导出收尾：调保存框、报结果 */
-async function saveExport(payload) {
-  let result;
-  try {
-    result = await api.saveFile(payload);
-  } catch (err) {
-    showToast((err && err.message) || '导出失败', 'error');
-    return;
-  }
-
-  if (!result || result.canceled) return;
-  if (result.error) {
-    showToast(`没能写出文件：${result.error}`, 'error');
-    return;
-  }
-  showToast('已导出到磁盘', 'ok');
-}
-
 /** 导出当前编辑的角色卡：存 .png 就是带数据的酒馆卡，存 .json 就是纯数据 */
 async function exportCharacter() {
   const character = editorCharacterById(editingCharacterId);
@@ -1647,19 +1594,6 @@ async function exportCharacter() {
     text: json,
     base64: String(png).split(',')[1] || '',
     pngText: { keyword: 'chara', text: base64Utf8(json) }
-  });
-}
-
-/** 导出当前编辑的世界书 */
-async function exportWorldbook() {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  await saveExport({
-    title: '导出世界书',
-    fileName: `${safeFileName(book.name)}.json`,
-    filters: [{ name: '世界书 JSON（酒馆可直接导入）', extensions: ['json'] }],
-    text: JSON.stringify(worldbookPayload(book), null, 2)
   });
 }
 
@@ -3502,652 +3436,6 @@ async function fetchModels() {
 }
 
 // ---------------------------------------------------------------------------
-//  世界书（World Info / Lorebook）
-//  左栏选书，中栏列条目，右栏编辑。数据在主进程的 worldbooks.json。
-//  词条只由「会话绑定了哪本书」生效；每本书还能装若干角色副本（独立个体）。
-// ---------------------------------------------------------------------------
-
-const WB_NEW_ENTRY_DEFAULTS = {
-  order: 100,
-  probability: 100,
-  selectiveLogic: 'AND_ANY',
-  constant: false,
-  enabled: true
-};
-
-/** 世界书的条目数展示 */
-function wbEntryCountText(book) {
-  if (!book) return '';
-  const total = (book.entries || []).length;
-  const on = (book.entries || []).filter((e) => e.enabled !== false).length;
-  return on === total ? `${total} 条条目` : `${total} 条条目 · ${on} 条启用`;
-}
-
-function currentWorldbook() {
-  return worldbookById(editingWorldbookId);
-}
-
-function currentEntry() {
-  const book = currentWorldbook();
-  if (!book) return null;
-  return (book.entries || []).find((e) => e.id === editingEntryId) || null;
-}
-
-/** 把世界书表单里的内容写回内存（书名 + 开场白） */
-function stashWorldbookName() {
-  const book = currentWorldbook();
-  if (!book || el.wb.entriesWrap.classList.contains('hidden')) return;
-  const name = el.wb.name.value.trim() || '未命名世界书';
-  book.name = name.slice(0, 120);
-  book.opening = el.wb.opening.value.slice(0, 4000);
-  book.updatedAt = now();
-}
-
-/** 把条目表单里的内容写回内存 */
-function stashEntryForm() {
-  const entry = currentEntry();
-  if (!entry || el.wb.form.classList.contains('hidden')) return;
-
-  const parseKeys = (value) =>
-    String(value || '')
-      .split(/[,，]/)
-      .map((k) => k.trim())
-      .filter(Boolean)
-      .slice(0, 200);
-
-  entry.title = el.wb.e.title.value.trim().slice(0, 200) || parseKeys(el.wb.e.keys.value)[0] || '未命名条目';
-  entry.keys = parseKeys(el.wb.e.keys.value);
-  entry.secondaryKeys = parseKeys(el.wb.e.keys2.value);
-  entry.selectiveLogic = el.wb.e.logic.value;
-  entry.content = el.wb.e.content.value.slice(0, 20000);
-
-  const order = Number(el.wb.e.order.value);
-  entry.order = isFinite(order) ? Math.max(0, Math.min(9999, Math.floor(order))) : WB_NEW_ENTRY_DEFAULTS.order;
-
-  const prob = Number(el.wb.e.prob.value);
-  entry.probability = isFinite(prob) ? Math.max(0, Math.min(100, Math.floor(prob))) : 100;
-
-  entry.constant = el.wb.e.constant.checked;
-  entry.recursive = el.wb.e.recursive.checked;
-  entry.enabled = el.wb.e.enabled.checked;
-}
-
-function renderEntryList() {
-  el.wb.entryList.innerHTML = '';
-
-  const book = currentWorldbook();
-  if (!book) return;
-
-  const entries = book.entries || [];
-  if (!entries.length) {
-    el.wb.entryList.appendChild(
-      h('div', { class: 'wb-list-empty', text: '这本书还没有条目，点「＋ 条目」加一条' })
-    );
-    return;
-  }
-
-  for (const entry of entries) {
-    el.wb.entryList.appendChild(
-      h(
-        'div',
-        {
-          class: ['wb-entry', entry.id === editingEntryId && 'active', entry.enabled === false && 'disabled'],
-          title: entry.title,
-          onclick: () => selectEntry(entry.id)
-        },
-        h(
-          'div',
-          { class: 'wb-entry-title' },
-          h('span', { text: entry.title }),
-          entry.constant && h('span', { class: 'wb-badge', text: '常驻' }),
-          entry.enabled === false && h('span', { class: 'wb-badge', text: '停用' })
-        ),
-        h('div', { class: 'wb-entry-keys', text: (entry.keys || []).join(' / ') || '（无关键词）' })
-      )
-    );
-  }
-}
-
-function showEntryForm(show) {
-  el.wb.form.classList.toggle('hidden', !show);
-  el.wb.formEmpty.classList.toggle('hidden', !!show);
-}
-
-function fillEntryForm(entry) {
-  if (!entry) {
-    showEntryForm(false);
-    return;
-  }
-
-  el.wb.e.title.value = entry.title || '';
-  el.wb.e.keys.value = (entry.keys || []).join(', ');
-  el.wb.e.content.value = entry.content || '';
-  el.wb.e.order.value = String(entry.order ?? WB_NEW_ENTRY_DEFAULTS.order);
-  el.wb.e.prob.value = String(entry.probability ?? 100);
-  el.wb.e.keys2.value = (entry.secondaryKeys || []).join(', ');
-  el.wb.e.logic.value = entry.selectiveLogic || 'AND_ANY';
-  el.wb.e.constant.checked = entry.constant === true;
-  el.wb.e.recursive.checked = entry.recursive === true;
-  el.wb.e.enabled.checked = entry.enabled !== false;
-
-  showEntryForm(true);
-}
-
-/** 选中一本世界书 */
-function selectWorldbook(id) {
-  stashWorldbookName();
-  stashEntryForm();
-
-  editingWorldbookId = id;
-  const book = currentWorldbook();
-
-  el.wb.entriesEmpty.classList.toggle('hidden', !!book);
-  el.wb.entriesWrap.classList.toggle('hidden', !book);
-
-  if (!book) {
-    editingEntryId = null;
-    showEntryForm(false);
-    renderWorldbookChars();
-    return;
-  }
-
-  el.wb.name.value = book.name;
-  el.wb.opening.value = book.opening || '';
-  el.wb.entryCount.textContent = wbEntryCountText(book);
-  el.wb.footHint.textContent = `「${book.name}」只保存在你自己电脑上`;
-
-  // 上一本书选中的条目在新书里不存在，自动落到第一条
-  if (!currentEntry()) {
-    editingEntryId = (book.entries || []).length ? book.entries[0].id : null;
-  }
-
-  renderEntryList();
-  fillEntryForm(currentEntry());
-  renderWorldbookChars();
-}
-
-function selectEntry(id) {
-  stashEntryForm();
-  editingEntryId = id;
-  renderEntryList();
-  fillEntryForm(currentEntry());
-}
-
-// ---------------------------------------------------------------------------
-//  本书角色：从角色库复制进来的独立副本
-//  和角色库里的那个角色互相独立 —— 改这边不影响那边，反之亦然。
-// ---------------------------------------------------------------------------
-
-/** 副本的 id 单独一个前缀，和角色库、会话的 id 不会看混 */
-function newWorldbookCharId() {
-  return `wc${uid()}`;
-}
-
-/** 画「本书角色」那一排 */
-function renderWorldbookChars() {
-  const host = el.wb.charList;
-  if (!host) return;
-  clear(host);
-
-  const book = currentWorldbook();
-  if (!book) return;
-
-  for (const c of worldbookCharacters(book)) {
-    host.appendChild(
-      h(
-        'div',
-        { class: 'wb-char-chip', title: c.name },
-        h(
-          'div',
-          { class: 'wb-char-chip-avatar' },
-          c.avatar ? h('img', { src: c.avatar, alt: '' }) : c.name.slice(0, 1)
-        ),
-        h('span', { class: 'wb-char-chip-name', text: c.name }),
-        button({
-          class: 'wb-char-chip-btn',
-          text: '编辑',
-          title: '编辑这个副本的设定',
-          onClick: () => editWorldbookCharacter(c.id)
-        }),
-        button({
-          class: 'wb-char-chip-btn',
-          text: '移除',
-          title: '从本书移除（角色库里的不受影响）',
-          onClick: () => removeWorldbookCharacter(c.id)
-        })
-      )
-    );
-  }
-}
-
-/** 把选中的角色库角色复制进本书：深拷贝一份，id 另发，两边从此互不相干 */
-async function addWorldbookCharacters(ids) {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  const wanted = new Set(ids);
-  const picked = characters().filter((c) => wanted.has(c.id));
-  if (!picked.length) return;
-
-  book.characters = worldbookCharacters(book);
-  for (const src of picked) {
-    const copy = JSON.parse(JSON.stringify(src));
-    copy.id = newWorldbookCharId();
-    copy.createdAt = now();
-    copy.updatedAt = now();
-    book.characters.push(copy);
-  }
-  book.updatedAt = now();
-
-  renderWorldbookChars();
-  renderWorldbookPage();
-
-  const ok = await persistLibrary();
-  showToast(ok ? `已加入 ${picked.length} 个角色副本` : '加入失败，没能写入磁盘', ok ? 'ok' : 'error');
-}
-
-/**
- * 在本书里新建一个角色副本。
- * 和角色库那边一样：先只做成草稿给用户填，点「保存角色」之后才真的加进这本书 ——
- * 免得点一下就在书里多出一个空的「新角色」。
- */
-function newWorldbookCharacter() {
-  if (!currentWorldbook()) return;
-  charEditorScope = 'worldbook';
-  startCharDraft();
-}
-
-/** 从本书移除一个角色副本（角色库里的角色不动） */
-async function removeWorldbookCharacter(id) {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  const target = worldbookCharacters(book).find((c) => c.id === id);
-  if (!target) return;
-
-  const ok = await confirmDialog({
-    title: '移除角色',
-    message: `把「${target.name}」从这本书里移除？角色库里的那个角色不受影响。`,
-    confirmText: '移除',
-    danger: true
-  });
-  if (!ok) return;
-
-  book.characters = worldbookCharacters(book).filter((c) => c.id !== id);
-  book.updatedAt = now();
-
-  renderWorldbookChars();
-  renderWorldbookPage();
-  await persistLibrary();
-  showToast('已移除', 'ok');
-}
-
-/** 打开角色编辑器，但作用域切到这本书的角色副本 */
-function editWorldbookCharacter(id) {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  charEditorScope = 'worldbook';
-  editingCharacterId = id;
-  openCharsModal();
-}
-
-// --- 从角色库多选加入 ---
-
-let wbPickerChars = [];
-const wbPickerPicked = new Set();
-
-function openWorldbookCharPicker() {
-  const list = characters();
-  if (!list.length) {
-    showToast('角色库里还没有角色，先建一个吧', 'error');
-    return;
-  }
-
-  wbPickerChars = list;
-  wbPickerPicked.clear();
-  renderWorldbookCharPicker();
-  el.wbPicker.modal.classList.remove('hidden');
-}
-
-function closeWorldbookCharPicker() {
-  el.wbPicker.modal.classList.add('hidden');
-  wbPickerChars = [];
-  wbPickerPicked.clear();
-}
-
-function renderWorldbookCharPicker() {
-  const host = el.wbPicker.list;
-  host.innerHTML = '';
-
-  if (!wbPickerChars.length) {
-    const tip = document.createElement('div');
-    tip.className = 'wb-picker-empty';
-    tip.textContent = '角色库是空的';
-    host.appendChild(tip);
-    return;
-  }
-
-  for (const c of wbPickerChars) {
-    const row = document.createElement('label');
-    row.className = `wb-picker-row${wbPickerPicked.has(c.id) ? ' picked' : ''}`;
-
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.checked = wbPickerPicked.has(c.id);
-    box.addEventListener('change', () => {
-      if (box.checked) wbPickerPicked.add(c.id);
-      else wbPickerPicked.delete(c.id);
-      row.classList.toggle('picked', box.checked);
-      updateWorldbookCharPickerHint();
-    });
-
-    const av = document.createElement('div');
-    av.className = 'wb-picker-avatar';
-    if (c.avatar) {
-      const img = document.createElement('img');
-      img.src = c.avatar;
-      img.alt = '';
-      av.appendChild(img);
-    } else {
-      av.textContent = c.name.slice(0, 1);
-    }
-
-    const name = document.createElement('span');
-    name.className = 'wb-picker-name';
-    name.textContent = c.name;
-
-    row.append(box, av, name);
-    host.appendChild(row);
-  }
-
-  updateWorldbookCharPickerHint();
-}
-
-function updateWorldbookCharPickerHint() {
-  if (!el.wbPicker.hint) return;
-  el.wbPicker.hint.textContent = wbPickerPicked.size
-    ? `已选 ${wbPickerPicked.size} 个`
-    : '加入的是副本，之后两边各改各的';
-}
-
-async function confirmWorldbookCharPicker() {
-  const ids = [...wbPickerPicked];
-  if (!ids.length) {
-    showToast('先勾选要加入的角色', 'error');
-    return;
-  }
-  closeWorldbookCharPicker();
-  await addWorldbookCharacters(ids);
-}
-
-/**
- * 把当前角色的世界书绑定关系同步到磁盘。
- * 角色卡和世界书是两个文件，主进程允许一次写入同时带上两者。
- * 返回是否成功 —— 绑定这类操作失败时界面要回滚，不能假装成功。
- */
-async function persistLibrary() {
-  // 世界书没读进来就什么都别写：写下去等于把文件清空
-  if (!worldbooksLoaded) {
-    showToast('世界书上次没能读出来，先别改它 —— 重启应用再试', 'error');
-    return false;
-  }
-
-  try {
-    await api.saveCharacters({ characters: characters(), worldbooks: worldbooks() });
-    return true;
-  } catch (err) {
-    console.error('保存世界书失败', err);
-    showToast('世界书没能保存到磁盘', 'error');
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-//  世界书编辑器
-//  只负责编辑「当前这一本」：选书、新建、游玩、导入都在世界书列表页那边。
-//  「绑定到会话」整套已经拿掉 —— 世界书是一个世界，从列表页点「游玩」进入，
-//  不再往已经开始的对话上挂。
-// ---------------------------------------------------------------------------
-
-/**
- * 打开编辑器去编辑某一本。这是列表页「编辑」按钮的动作，由入口层注入给列表页。
- *
- * 它留在这儿而不是跟着列表页走：要设 editingWorldbookId —— 那是**编辑器弹窗**
- * 的状态，只有这一区在读（currentWorldbook / selectWorldbook / openWorldbooksModal）。
- * 列表页不需要知道有「当前选中的是哪本」这回事。
- */
-function editWorldbookFromPage(id) {
-  const book = worldbookById(id);
-  if (!book) return;
-  editingWorldbookId = id;
-  openWorldbooksModal();
-}
-
-function openWorldbooksModal() {
-  // 角色库可能没开着（侧边栏可以直接进世界书），stashCharForm 内部会自己判断
-  stashCharForm();
-
-  if (!editingWorldbookId || !currentWorldbook()) {
-    editingWorldbookId = worldbooks().length ? worldbooks()[0].id : null;
-  }
-
-  selectWorldbook(editingWorldbookId);
-  renderWorldbookChars();
-
-  el.wb.modal.classList.remove('hidden');
-}
-
-function closeWorldbooksModal() {
-  stashWorldbookName();
-  stashEntryForm();
-
-  el.wb.modal.classList.add('hidden');
-  renderWorldbookChars();
-  persistLibrary();
-  // 列表页可能还开着（编辑完回来看得到最新状态）
-  renderWorldbookPage();
-}
-
-/** 新建一本世界书，并直接进编辑器 */
-function newWorldbook() {
-  stashWorldbookName();
-  stashEntryForm();
-
-  const book = {
-    id: `w${uid()}`,
-    name: '新世界书',
-    entries: [],
-    characters: [],
-    createdAt: now(),
-    updatedAt: now()
-  };
-
-  state.worldbooks = [...worldbooks(), book];
-  editingWorldbookId = book.id;
-  renderWorldbookPage();
-
-  openWorldbooksModal();
-  el.wb.name.focus();
-  el.wb.name.select();
-}
-
-function newEntry() {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  stashEntryForm();
-
-  const entry = {
-    id: `e${Date.now().toString(36)}${Math.floor(Math.random() * 9000 + 1000)}`,
-    title: '新条目',
-    keys: [],
-    secondaryKeys: [],
-    selectiveLogic: WB_NEW_ENTRY_DEFAULTS.selectiveLogic,
-    content: '',
-    order: WB_NEW_ENTRY_DEFAULTS.order,
-    constant: false,
-    matchWholeWords: false,
-    caseSensitive: false,
-    probability: WB_NEW_ENTRY_DEFAULTS.probability,
-    enabled: true
-  };
-
-  book.entries = [...(book.entries || []), entry];
-  book.updatedAt = now();
-
-  el.wb.entryCount.textContent = wbEntryCountText(book);
-  renderEntryList();
-  selectEntry(entry.id);
-
-  el.wb.e.title.focus();
-  el.wb.e.title.select();
-}
-
-async function saveEntry() {
-  const entry = currentEntry();
-  const book = currentWorldbook();
-  if (!entry || !book) return;
-
-  stashEntryForm();
-
-  // 没关键词又不是常驻的条目永远不会触发，提醒一下（但不阻止保存）
-  if (!entry.constant && !entry.keys.length) {
-    showToast('这条既没有关键词、也不是常驻，永远不会被注入', 'error');
-  }
-
-  book.updatedAt = now();
-  el.wb.entryCount.textContent = wbEntryCountText(book);
-  renderEntryList();
-  fillEntryForm(entry);
-
-  await persistLibrary();
-  showToast('条目已保存', 'ok');
-}
-
-async function deleteEntry() {
-  const entry = currentEntry();
-  const book = currentWorldbook();
-  if (!entry || !book) return;
-
-  stashEntryForm();
-
-  const ok = await confirmDialog({
-    title: '删除条目',
-    message: `删除条目「${entry.title}」？`,
-    confirmText: '删除',
-    danger: true
-  });
-  if (!ok) return;
-
-  book.entries = (book.entries || []).filter((e) => e.id !== entry.id);
-  book.updatedAt = now();
-
-  editingEntryId = book.entries.length ? book.entries[0].id : null;
-  el.wb.entryCount.textContent = wbEntryCountText(book);
-  renderEntryList();
-  fillEntryForm(currentEntry());
-
-  await persistLibrary();
-  showToast('条目已删除');
-}
-
-async function deleteWorldbook() {
-  const book = currentWorldbook();
-  if (!book) return;
-
-  stashWorldbookName();
-
-  const charCount = worldbookCharacters(book).length;
-  const usedByConvo = state.conversations.filter((c) => convoWorldbookIds(c).includes(book.id)).length;
-  const bits = [`${(book.entries || []).length} 条条目`];
-  if (charCount) bits.push(`${charCount} 个角色副本`);
-  const tail = usedByConvo ? `；它还在 ${usedByConvo} 个会话里生效，删掉后那些会话会失去它的设定` : '';
-
-  const ok = await confirmDialog({
-    title: '删除世界书',
-    message: `删除「${book.name}」？这本书里的 ${bits.join('、')}会一起删掉${tail}。`,
-    confirmText: '删除',
-    danger: true
-  });
-  if (!ok) return;
-
-  state.worldbooks = worldbooks().filter((w) => w.id !== book.id);
-
-  // 会话上还绑着这本书的要一起摘掉，别留下指向空气的 id
-  for (const convo of state.conversations) {
-    const ids = convoWorldbookIds(convo);
-    if (ids.includes(book.id)) {
-      convo.worldbookIds = ids.filter((id) => id !== book.id);
-      convo.updatedAt = now();
-    }
-  }
-
-  // 角色编辑器可能正开在这本书的副本上，退回角色库
-  if (charEditorScope === 'worldbook') charEditorScope = 'library';
-
-  editingWorldbookId = worldbooks().length ? worldbooks()[0].id : null;
-  renderWorldbookPage();
-
-  persistConversations(0);
-  await persistLibrary();
-  showToast('世界书已删除');
-}
-
-/**
- * 预览「正在编辑的这本书」会在当前会话里命中哪些条目。
- * 用的就是真实请求时的扫描逻辑，方便排查关键词写没写对。
- * 以前是预览「会话绑定的那些书」，绑定那套拿掉之后改成预览当前编辑的这本。
- */
-async function previewWorldbook() {
-  const book = currentWorldbook();
-  if (!book) {
-    showToast('先选一本书', 'error');
-    return;
-  }
-
-  const convo = activeConvo();
-
-  if (!convo) {
-    showToast('当前没有会话', 'error');
-    return;
-  }
-
-  const history = convo.messages.filter(
-    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
-  );
-
-  if (!history.length) {
-    showToast('这个会话还没有消息，先聊两句再看预览', 'error');
-    return;
-  }
-
-  try {
-    const result = await api.previewWorldbook({
-      worldbookIds: [book.id],
-      scanDepth: WORLDBOOK_SCAN_DEPTH,
-      recursiveDepth: recursiveDepthSetting(),
-      messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
-    });
-
-    const hits = (result && result.hits) || [];
-    if (!hits.length) {
-      showToast(`扫了最近 ${result.scanDepth} 条消息，${result.total} 条条目一条都没命中`, 'error');
-      return;
-    }
-
-    const names = hits.map((h) => h.title).join('、');
-    // 递归带进来的单独说一声 —— 不然用户只会觉得「怎么突然多塞了这么多设定」
-    const viaChain = Number(result && result.recursiveCount) || 0;
-    const tail = viaChain ? `（其中 ${viaChain} 条是递归带进来的）` : '';
-    showToast(`「${book.name}」命中 ${hits.length} 条：${names}${tail}`);
-  } catch (err) {
-    console.error('预览失败', err);
-    showToast('预览失败', 'error');
-  }
-}
-
-// ---------------------------------------------------------------------------
 //  事件绑定
 // ---------------------------------------------------------------------------
 
@@ -4313,7 +3601,6 @@ function bindEvents() {
   el.btnDelChar.addEventListener('click', deleteCharacter);
   el.btnExportChar.addEventListener('click', exportCharacter);
   el.btnExportConvo.addEventListener('click', exportConversation);
-  el.wb.btnExport.addEventListener('click', exportWorldbook);
   el.btnImportCard.addEventListener('click', importCards);
 
   // 点头像换图 / 清除头像
@@ -4371,26 +3658,6 @@ function bindEvents() {
   // 世界书 → 切到世界书列表页
   el.btnWorldbooks.addEventListener('click', () => showView('worldbooks'));
 
-  el.wb.btnClose.addEventListener('click', closeWorldbooksModal);
-  el.wb.btnClose2.addEventListener('click', closeWorldbooksModal);
-  el.wb.btnImport.addEventListener('click', importWorldbooks);
-  el.wb.btnNew.addEventListener('click', newWorldbook);
-  el.wb.btnNewEntry.addEventListener('click', newEntry);
-  el.wb.btnDelBook.addEventListener('click', deleteWorldbook);
-  el.wb.btnDelEntry.addEventListener('click', deleteEntry);
-  el.wb.btnSaveEntry.addEventListener('click', saveEntry);
-  el.wb.btnPreview.addEventListener('click', previewWorldbook);
-  el.wb.btnAddChars.addEventListener('click', openWorldbookCharPicker);
-  el.wb.btnNewChar.addEventListener('click', newWorldbookCharacter);
-
-  // 从角色库多选加入
-  el.wbPicker.btnClose.addEventListener('click', closeWorldbookCharPicker);
-  el.wbPicker.btnCancel.addEventListener('click', closeWorldbookCharPicker);
-  el.wbPicker.btnConfirm.addEventListener('click', confirmWorldbookCharPicker);
-  el.wbPicker.modal.addEventListener('click', (event) => {
-    if (event.target === el.wbPicker.modal) closeWorldbookCharPicker();
-  });
-
   // 进入世界前创建玩家角色
   el.btnClosePlayer.addEventListener('click', closePlayerModal);
   el.btnCancelPlayer.addEventListener('click', closePlayerModal);
@@ -4398,25 +3665,6 @@ function bindEvents() {
   el.playerChar.addEventListener('change', applyPlayerCharChoice);
   el.playerModal.addEventListener('click', (event) => {
     if (event.target === el.playerModal) closePlayerModal();
-  });
-
-  // 世界书名称和条目内容都是边打字边留在内存里，关闭弹窗时统一落盘
-  el.wb.name.addEventListener('input', () => {
-    const book = currentWorldbook();
-    if (!book) return;
-    book.name = el.wb.name.value.trim() || '未命名世界书';
-    renderWorldbookPage();
-    renderWorldbookChars();
-  });
-
-  el.wb.opening.addEventListener('input', () => {
-    const book = currentWorldbook();
-    if (!book) return;
-    book.opening = el.wb.opening.value.slice(0, 4000);
-  });
-
-  el.wb.modal.addEventListener('click', (event) => {
-    if (event.target === el.wb.modal) closeWorldbooksModal();
   });
 
   // 左上角的昼夜切换
@@ -4552,7 +3800,7 @@ function persistCharacters(immediate) {
   // 角色和世界书分开存两个文件，主进程允许一次请求同时带上 worldbooks；
   // 但只在世界书确实读进来了时才带 —— 否则「存一次角色」会把 worldbooks.json 写空。
   const payload = { characters: characters() };
-  if (worldbooksLoaded) payload.worldbooks = worldbooks();
+  if (areWorldbooksLoaded()) payload.worldbooks = worldbooks();
 
   if (immediate) {
     api.saveCharactersNow(payload);
@@ -5988,13 +5236,13 @@ async function importCards() {
  * 在世界书弹窗里「导入世界书」。
  * 复用角色的导入通道（同一个文件框），只是落点不同：
  * 角色照样进角色库，世界书则挂到当前选中的这本书所在的位置。
+ *
+ * 刻意留在入口层：它要同时动角色库、世界书列表页、角色列表页 ——
+ * 属于跨视图编排。世界书弹窗里的「导入」按钮由 initWorldbook 注入到这个函数。
  */
 async function importWorldbooks() {
   const picked = await pickImportFiles({
-    before: () => {
-      stashWorldbookName();
-      stashEntryForm();
-    },
+    before: () => stashWorldbookForm(),
     button: el.wb.btnImport,
     busyText: '导入中…',
     idleText: '导入世界书',
@@ -6008,9 +5256,7 @@ async function importWorldbooks() {
 
   if (freshBooks.length) {
     // 直接打开刚导入的那本，方便马上核对设定对不对
-    editingWorldbookId = freshBooks[freshBooks.length - 1].id;
-    renderWorldbookPage();
-    openWorldbooksModal();
+    openWorldbookEditor(freshBooks[freshBooks.length - 1].id);
   } else {
     renderWorldbookPage();
   }
@@ -6038,6 +5284,24 @@ async function init() {
   registerRefreshListeners();
   // 只绑事件、不参与整体重绘的模块
   initPerspectiveUi();
+  // 世界书编辑器同理。它要切「角色编辑器作用域」再打开角色编辑器弹窗 ——
+  // 那是跨视图编排，所以那几个动作由这里注入进去（视图不向上 import）。
+  initWorldbook({
+    importBooks: importWorldbooks,
+    stashDraft: () => stashCharForm(),
+    openInBook: (id) => {
+      charEditorScope = 'worldbook';
+      editingCharacterId = id;
+      openCharsModal();
+    },
+    draftInBook: () => {
+      charEditorScope = 'worldbook';
+      startCharDraft();
+    },
+    releaseScope: () => {
+      if (charEditorScope === 'worldbook') charEditorScope = 'library';
+    }
+  });
 
   const config = await api.getSettings();
   state.settings = config.settings;
@@ -6056,7 +5320,7 @@ async function init() {
   try {
     const storedBooks = await api.getWorldbooks();
     state.worldbooks = Array.isArray(storedBooks && storedBooks.worldbooks) ? storedBooks.worldbooks : [];
-    worldbooksLoaded = true;
+    markWorldbooksLoaded();
   } catch (err) {
     console.error('读取世界书失败', err);
     showToast('世界书没能读出来，本次不会写回它（重启试试）', 'error');
