@@ -8,8 +8,8 @@
 //    core/   底层：常量、状态、DOM 引用、preload 桥、工具函数
 //    ui/     通用界面件：提示条、确认框、主题、Markdown
 //    data/   纯逻辑：服务商/模型、角色库、面板、叙述规则、摘要、持久化、导入重发 id
-//    views/  一个功能一块（refresh.js 刷新总线、player.js 玩家角色弹窗、
-//            memoryUi.js 记忆管理 + 存档点）
+//    views/  一个功能一块（refresh.js 刷新总线、header.js 对话头部、
+//            player.js 玩家角色弹窗、memoryUi.js 记忆管理 + 存档点）
 //  这个文件暂时还装着绝大部分功能，下面会一块一块搬出去。
 //
 //  拆的时候有两条约束，别踩：
@@ -54,7 +54,8 @@ import {
   characterAttrs,
   worldbooks,
   worldbookById,
-  worldbookCharacters
+  worldbookCharacters,
+  convoWorldbookIds
 } from './data/library.js';
 import {
   cleanAssistantText,
@@ -102,6 +103,7 @@ import {
   charNameForSummary
 } from './data/memory.js';
 import { onRefresh, refreshAll } from './views/refresh.js';
+import { renderHeader, initHeader } from './views/header.js';
 import {
   openPlayerModal,
   closePlayerModal,
@@ -161,11 +163,6 @@ function isCharDraft() {
 }
 
 // --- 世界书 ---
-
-/** 会话绑定了哪些世界书（id 列表，容错老数据） */
-function convoWorldbookIds(convo) {
-  return convo && Array.isArray(convo.worldbookIds) ? convo.worldbookIds : [];
-}
 
 /**
  * 扫一遍近期消息，把命中的世界书条目拼成注入块。
@@ -447,73 +444,6 @@ function renderConvoList() {
         })
       )
     );
-  }
-}
-
-function renderHeader() {
-  const convo = activeConvo();
-  const settings = state.settings || {};
-  el.convoTitle.textContent = (convo && convo.title) || '新对话';
-
-  const endpoint = currentEndpoint();
-  const character = characterForConvo(convo);
-  const prefix = character ? `${character.name} · ` : '';
-
-  if (!endpoint) {
-    el.convoMeta.textContent = '还没有配置模型服务 —— 点左下角「设置」';
-  } else if (!endpoint.provider.apiKey) {
-    el.convoMeta.textContent = `${prefix}还没有填「${endpoint.provider.name}」的 API Key —— 点左下角「设置」`;
-  } else {
-    el.convoMeta.textContent = `${prefix}${endpoint.provider.name} · ${endpoint.model || '未选模型'}`;
-  }
-
-  // 世界书：把「当前实际生效的是哪些」写清楚，并标出来源。
-  // 以前这里只显示会话绑的书，角色自带的那本完全不可见 ——
-  // 用户根本没法判断它到底有没有生效，只能靠猜。
-  const convoBookIds = convoWorldbookIds(convo);
-  const convoBooks = convoBookIds.map((id) => worldbookById(id)).filter(Boolean);
-  const charBookIds = character && Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
-  const charBooks = charBookIds.map((id) => worldbookById(id)).filter(Boolean);
-
-  if (convoBooks.length) {
-    el.convoMeta.textContent += ` · 世界：${convoBooks.map((b) => b.name).join('、')}`;
-    // 会话绑了世界时，角色的书按设计让位 —— 但要说出来，不能悄悄不生效
-    if (charBooks.length) {
-      el.convoMeta.textContent +=
-        character.worldbookEnabled === false
-          ? '（角色自带的书已关掉）'
-          : '（角色自带的书这次不生效：世界优先）';
-    }
-  } else if (charBooks.length) {
-    el.convoMeta.textContent +=
-      character.worldbookEnabled === false
-        ? ` · 自带世界书：${charBooks.map((b) => b.name).join('、')}（已关掉）`
-        : ` · 世界：${charBooks.map((b) => b.name).join('、')}（角色自带）`;
-  }
-
-  // 视角：只在偏离默认（标准 + 一步一步 + 非 GM）时提示，平时不占位置
-  const viewTags = [];
-  if (isGmMode(convo)) viewTags.push('GM 模式');
-  const narrationMode = convoNarrationMode(convo);
-  if (narrationMode !== DEFAULT_NARRATION_MODE) viewTags.push(NARRATION_MODES[narrationMode].label);
-  const paceMode = convoPaceMode(convo);
-  if (paceMode !== DEFAULT_PACE_MODE) viewTags.push(PACE_MODES[paceMode].label);
-  if (viewTags.length) el.convoMeta.textContent += ` · ${viewTags.join(' + ')}`;
-
-  // 记忆：正在压缩时给个提示，压缩完显示覆盖了多少条
-  const segCount = convoSummaries(convo).length;
-  if (convo && convo.summaryBusy) el.convoMeta.textContent += ' · 正在整理记忆…';
-  else if (segCount) el.convoMeta.textContent += ` · 记忆 ${segCount} 段`;
-
-  el.hintText.textContent = settings.sendOnEnter === false
-    ? 'Ctrl + Enter 发送 · Enter 换行'
-    : 'Enter 发送 · Shift + Enter 换行';
-
-  if (state.usage && settings.showUsage !== false) {
-    const u = state.usage;
-    el.usageText.textContent = `本次用量：输入 ${u.prompt_tokens ?? '-'} / 输出 ${u.completion_tokens ?? '-'} tokens`;
-  } else {
-    el.usageText.textContent = '';
   }
 }
 
@@ -957,15 +887,18 @@ function refreshLibraryPage() {
 /**
  * 登记「谁需要被重绘」。顺序 = 绘制顺序，和以前 renderAll 里的调用顺序一致。
  *
- * 这八行是 views/ 拆分的接线板：等各功能搬进自己的文件之后，登记语句跟着
- * 搬过去，renderAll / refreshAll 谁都不用认识。
+ * 这里是 views/ 拆分的接线板：功能搬进自己的文件之后，登记语句跟着搬过去 ——
+ * 由那个模块导出的 initXxx() 在原位登记（下面带 → 注释的两行就是）。
+ * 保持原位是为了绘制顺序和以前一致；各视图只写自己的 DOM 区域，
+ * 顺序其实不影响结果，但没必要改。
  */
 function registerRefreshListeners() {
   onRefresh(renderConvoList);
-  onRefresh(renderHeader);
+  initHeader(); // → onRefresh(renderHeader)
   onRefresh(renderModelSwitch);
   onRefresh(() => syncPanelVisibilityForConvo(activeConvo()));
   onRefresh(renderPanel);
+  initMemoryUi(); // → onRefresh(renderMemoryIndicator)
   onRefresh(renderMessages);
   onRefresh(refreshLibraryPage);
 }
@@ -6531,11 +6464,9 @@ async function importWorldbooks() {
 
 async function init() {
   bindEvents();
-  // 必须在第一次 renderAll 之前登记 —— 否则首屏一个视图都不会画
+  // 必须在第一次 renderAll 之前登记 —— 否则首屏一个视图都不会画。
+  // 各功能模块的事件绑定也在这一步完成（它们的 init 里带着自己的登记）。
   registerRefreshListeners();
-  // 各功能模块自己的接线：事件绑定 + 向总线登记自己的重绘。
-  // 放在这儿（首屏之前）是因为登记必须早于第一次广播。
-  initMemoryUi();
 
   const config = await api.getSettings();
   state.settings = config.settings;

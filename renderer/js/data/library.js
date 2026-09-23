@@ -57,3 +57,8 @@ export function worldbookById(id) {
 export function worldbookCharacters(book) {
   return book && Array.isArray(book.characters) ? book.characters : [];
 }
+
+/** 会话绑定了哪些世界书（id 列表，容错老数据） */
+export function convoWorldbookIds(convo) {
+  return convo && Array.isArray(convo.worldbookIds) ? convo.worldbookIds : [];
+}
