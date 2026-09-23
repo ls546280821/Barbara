@@ -7714,23 +7714,38 @@ async function deleteCharacter() {
   await deleteCharacterById(character.id, charEditorScope);
 }
 
-async function importCards() {
-  stashCharForm();
+/**
+ * 「导入角色卡」和「导入世界书」共用的前半程：弹文件框 → 解析 → 重发一批 id。
+ *
+ * 两个入口只有三处不同 —— 点的是哪个按钮、忙时写什么字、以及导进来之后往哪儿落 ——
+ * 所以那三处交给参数和调用方，中间这一段（含「出错 / 取消 / 没内容」的兜底）
+ * 只留这一份实现。以前是两份几乎逐行重复的代码，还各自跑偏过一次：
+ * 只有角色卡那边会在忙时改按钮文字。
+ *
+ * @returns {Promise<{freshBooks: object[], freshChars: object[], errors: string[]}|null>}
+ *          null = 用户取消 / 出错 / 文件里什么都没有，调用方直接 return 即可。
+ */
+async function pickImportFiles({ before, button, busyText, idleText } = {}) {
+  if (before) before();
 
-  let result;
+  let result = null;
   try {
-    el.btnImportCard.disabled = true;
-    el.btnImportCard.textContent = '导入中…';
+    if (button) {
+      button.disabled = true;
+      if (busyText) button.textContent = busyText;
+    }
     result = await api.importCard();
   } catch (err) {
     showToast((err && err.message) || '导入失败', 'error');
-    return;
+    return null;
   } finally {
-    el.btnImportCard.disabled = false;
-    el.btnImportCard.textContent = '导入角色卡';
+    if (button) {
+      button.disabled = false;
+      if (idleText) button.textContent = idleText;
+    }
   }
 
-  if (!result || result.canceled) return;
+  if (!result || result.canceled) return null;
 
   const added = Array.isArray(result.characters) ? result.characters : [];
   const addedBooks = Array.isArray(result.worldbooks) ? result.worldbooks : [];
@@ -7738,18 +7753,41 @@ async function importCards() {
 
   if (!added.length && !addedBooks.length) {
     showToast(errors.length ? errors[0] : '没有导入任何内容', 'error');
-    return;
+    return null;
   }
 
   // 重新发一批 id（并把角色→世界书的指向一起改写，见 data/library-reissue.js）
-  const { books: freshBooks, chars: fresh } = reissueImported(addedBooks, added);
+  const { books: freshBooks, chars: freshChars } = reissueImported(addedBooks, added);
+  return { freshBooks, freshChars, errors };
+}
+
+/** 个别文件导入失败：主提示之后隔一会儿再补一条，不然会被前一条盖掉 */
+function warnImportErrors(errors) {
+  if (!errors.length) return;
+  console.warn('部分内容导入失败：', errors);
+  setTimeout(
+    () => showToast(`${errors.length} 个文件没能导入：${errors[0]}`, 'error'),
+    CONFIG.TOAST_DURATION_MS + 300
+  );
+}
+
+async function importCards() {
+  const picked = await pickImportFiles({
+    before: () => stashCharForm(),
+    button: el.btnImportCard,
+    busyText: '导入中…',
+    idleText: '导入角色卡',
+  });
+  if (!picked) return;
+
+  const { freshBooks, freshChars, errors } = picked;
 
   state.worldbooks = [...worldbooks(), ...freshBooks];
-  state.characters = [...characters(), ...fresh];
-  if (fresh.length) editingCharacterId = fresh[0].id;
+  state.characters = [...characters(), ...freshChars];
+  if (freshChars.length) editingCharacterId = freshChars[0].id;
 
   renderCharacterPage();
-  if (fresh.length) {
+  if (freshChars.length) {
     // 直接打开刚导入的第一个角色，方便马上核对设定对不对
     charEditorScope = 'library';
     openCharsModal();
@@ -7757,18 +7795,11 @@ async function importCards() {
   await persistCharacters();
 
   const parts = [];
-  if (fresh.length) parts.push(`${fresh.length} 个角色：${fresh.map((c) => c.name).join('、')}`);
+  if (freshChars.length) parts.push(`${freshChars.length} 个角色：${freshChars.map((c) => c.name).join('、')}`);
   if (freshBooks.length) parts.push(`${freshBooks.length} 个世界书`);
-
   showToast(`已导入 ${parts.join('，')}`, 'ok');
 
-  if (errors.length) {
-    console.warn('部分内容导入失败：', errors);
-    setTimeout(
-      () => showToast(`${errors.length} 个文件没能导入：${errors[0]}`, 'error'),
-      CONFIG.TOAST_DURATION_MS + 300
-    );
-  }
+  warnImportErrors(errors);
 }
 
 /**
@@ -7777,33 +7808,18 @@ async function importCards() {
  * 角色照样进角色库，世界书则挂到当前选中的这本书所在的位置。
  */
 async function importWorldbooks() {
-  stashWorldbookName();
-  stashEntryForm();
+  const picked = await pickImportFiles({
+    before: () => {
+      stashWorldbookName();
+      stashEntryForm();
+    },
+    button: el.wb.btnImport,
+    busyText: '导入中…',
+    idleText: '导入世界书',
+  });
+  if (!picked) return;
 
-  let result = null;
-  try {
-    el.wb.btnImport.disabled = true;
-    result = await api.importCard();
-  } catch (err) {
-    showToast((err && err.message) || '导入失败', 'error');
-    return;
-  } finally {
-    el.wb.btnImport.disabled = false;
-  }
-
-  if (!result || result.canceled) return;
-
-  const added = Array.isArray(result.characters) ? result.characters : [];
-  const addedBooks = Array.isArray(result.worldbooks) ? result.worldbooks : [];
-  const errors = Array.isArray(result.errors) ? result.errors : [];
-
-  if (!addedBooks.length && !added.length) {
-    showToast(errors.length ? errors[0] : '没有导入任何内容', 'error');
-    return;
-  }
-
-  // 主进程可能同一毫秒里生成多个 id，这里统一重发（含角色→世界书的指向）
-  const { books: freshBooks, chars: freshChars } = reissueImported(addedBooks, added);
+  const { freshBooks, freshChars, errors } = picked;
 
   state.worldbooks = [...worldbooks(), ...freshBooks];
   if (freshChars.length) state.characters = [...characters(), ...freshChars];
@@ -7826,13 +7842,7 @@ async function importWorldbooks() {
   if (freshChars.length) parts.push(`${freshChars.length} 个角色`);
   showToast(`已导入 ${parts.join('，')}`, 'ok');
 
-  if (errors.length) {
-    console.warn('部分内容导入失败：', errors);
-    setTimeout(
-      () => showToast(`${errors.length} 个文件没能导入：${errors[0]}`, 'error'),
-      CONFIG.TOAST_DURATION_MS + 300
-    );
-  }
+  warnImportErrors(errors);
 }
 
 // ---------------------------------------------------------------------------
