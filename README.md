@@ -161,7 +161,7 @@ barbara/
 │       ├── core/        常量 / 状态 / DOM 引用 / preload 桥 / 工具 / 面板字段桥
 │       ├── ui/          提示条 / 确认框 / 主题 / Markdown / 建 DOM 的小工具
 │       ├── data/        服务商模型 / 角色库 / 状态面板 / 叙述规则 / 记忆摘要 / 持久化 / 导出收尾
-│       └── views/       一个功能一块（refresh 总线 / header / perspectiveUi / panelUi / worldbookList / worldbook / player / memoryUi）
+│       └── views/       一个功能一块（refresh 总线 / header / perspectiveUi / panelUi / worldbookList / worldbook / settings / player / memoryUi）
 └── tools/           冒烟测试脚手架（假后端，不动你的真实数据）
 ```
 
@@ -169,13 +169,14 @@ barbara/
 > `require` **同一份代码**去验，而不是在测试里另写一套 —— 「内嵌世界书被丢掉」
 > 「导入后绑定指向不存在的书」这两个 bug 就是这么做才被抓住的。
 >
-> `renderer/js/main.js` 仍然不小（**5300+ 行**，大部分界面逻辑还在里面）。
+> `renderer/js/main.js` 仍然不小（**4600+ 行**，大部分界面逻辑还在里面）。
 > 它已切成 ES module，抽出了 `core/` `ui/` `data/` 三层，刷新总线已就位
-> （`views/refresh.js`），**views 已拆掉 8 个功能模块** ——
+> （`views/refresh.js`），**views 已拆掉 9 个功能模块** ——
 > `header`（对话头部）/ `perspectiveUi`（视角设置）/ `worldbookList`（世界书列表页）/
 > `panelUi`（状态面板）/ `player`（玩家角色弹窗）/ `memoryUi`（记忆 + 存档点）/
-> `worldbook`（世界书编辑器：选书 / 条目 / 本书角色 / 预览 / 导入导出）；
-> 接下来是 `characterImport` / `settings` / `characterEditor` / `chat` 等。
+> `worldbook`（世界书编辑器：选书 / 条目 / 本书角色 / 预览 / 导入导出）/
+> `settings`（设置弹窗：服务商编辑 / 生图 / 语义检索）；
+> 接下来是 `characterImport` / `characterList` / `characterEditor` / `chat` 等。
 > 体检数据、目标目录、以及「拆之前必须先做什么」都在
 > **[重构方案.md](重构方案.md)** 里（含当前进度）。
 >

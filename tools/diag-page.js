@@ -10,7 +10,7 @@
 //
 //  用法：
 //    unset ELECTRON_RUN_AS_NODE      # 本机默认带这个变量，electron 会退化成纯 node
-//    npx electron tools/diag-page.js --no-sandbox
+//    npm run diag                    # 脚本里带了 --no-sandbox（见下）
 //
 //  正常输出：[loaded] + [probe] 一段页面状态；
 //  其中 `settings:get` 那条报错是**正常**的（脚本不装假后端，拿不到响应）。
@@ -18,6 +18,11 @@
 
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
+
+// 诊断只读页面状态，用不到 GPU；关掉可以避开「GPU 进程崩溃把主进程带走」
+// 这类环境噪声（表现是页面加载失败 ERR_FAILED，和代码无关）。
+// 配套的 --no-sandbox 写在 package.json 的 `diag` 脚本里 —— 这台机器上两个都要。
+app.disableHardwareAcceleration();
 
 const APP_DIR = path.join(__dirname, '..');
 

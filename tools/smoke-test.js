@@ -19,6 +19,18 @@
 // ============================================================================
 
 const { app, BrowserWindow, ipcMain } = require('electron');
+
+// 测试只做 DOM 断言，用不到 GPU。某些环境（无独显 / 远程桌面 / 驱动状态异常）
+// 的 GPU 进程会反复崩溃并把主进程一起带走（日志里是
+// `FATAL: GPU process isn't usable. Goodbye.`），表现却是
+// 「页面加载失败：ERR_FAILED」—— 看着像代码坏了，其实和代码无关。
+// 关掉硬件加速就没有这个噪声（软件渲染对测试速度影响可以忽略）。
+//
+// 另一半在 package.json：`npm run smoke` 带了 `--no-sandbox`。
+// 2026-09-23 实测这台机器上光关硬件加速还不够，沙箱也要关，否则一样是 ERR_FAILED。
+// 这两个脚本不加载任何外部内容、IPC 全是内存里的假后端，关沙箱的代价可以忽略。
+app.disableHardwareAcceleration();
+
 const fs = require('fs');
 const path = require('path');
 
