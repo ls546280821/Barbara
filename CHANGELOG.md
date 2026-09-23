@@ -1,5 +1,188 @@
 # Barbara（原 Cyrene）优化更新日志
 
+## 2026-09 重构第十三批：拆完最后一块 `chat`，重构收尾
+
+> 同样**不改任何功能** —— 431 条冒烟断言全绿、控制台 0 报错；
+> 改前改后的测试日志 **diff 零行**（逐字节一致）。这是最大的一刀，
+> 却是验证最干净的一批 —— 因为它排在最后，依赖全就位，本刀只接线不重构。
+> `main.js` **2143 → 482 行**。进度见 **[重构方案.md](重构方案.md)**。
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/composer.js` | 445 | 输入框：发送 / 编辑 / 继续 / 重新生成 / 换候选 / 停止 / 自动长高 |
+| `views/chatMessages.js` | 309 | 消息列表渲染（`messageNode` / `renderMessages` / 开场白忙碌态）|
+| `views/chatExport.js` | 213 | 导出角色卡（PNG / JSON）+ 导出对话 Markdown |
+| `views/chatList.js` | 212 | 会话列表 + 右上角模型切换器 |
+| `views/worldPlay.js` | 174 | 进入世界：开新档 / 生成开场白 / 和角色开聊 |
+| `views/summarize.js` | 160 | 分段记忆摘要（自动触发 + 手动触发）|
+| `views/convoActions.js` | 144 | 切 / 删 / 清空会话，删消息，从某条消息分叉 |
+| `views/redraw.js` | 30 | 全量重绘门面 |
+| `data/conversations.js` | 92 | 会话骨架（新建 / 分叉）纯逻辑 |
+
+### 🚪 用 `redraw.js` 门面替掉「给每个视图注入重绘函数」
+
+拆到一半发现一个规律：**几乎每个视图干完活都要「重画全屏」**。按老办法
+（`initXxx({ rerender })` 注入），入口层要给 8 个模块各塞一遍同样的回调，
+而且以后每加一个模块都得记得回来补一笔。
+
+既然它不含任何「只有入口层才知道」的东西，就单拎成一个公开门面：
+
+```js
+// views/redraw.js
+export function renderAll(options) {
+  dropSuggestionsIfConvoChanged();   // 先问建议条：换了会话就不该继续挂着
+  refreshAll(options);               // 再走刷新总线广播
+}
+```
+
+视图直接 `import { renderAll } from './redraw.js'`，不再向上要回调。
+它只依赖 `views/refresh.js` 和 `views/suggestionsUi.js`，**不点名任何具体视图** ——
+绘制名单在刷新总线的登记表里，所以不会有环。这一改动把
+「19 对分区互相调用」里最主要的那个来源直接掐掉了。
+
+### ⚠️ 三条刻意留在入口层（判据沿用第七批）
+
+| 留在 `main.js` | 为什么 |
+| --- | --- |
+| `api.onChunk` / `api.onReasoning` | 流式的**全局入口**，一次要同时驱动消息列表、输入框状态、建议条；不属于任何单个视图 |
+| Esc 的有序关闭链 | 「某个视图的实现」还是「一条有序链上的一环」—— 后者属入口层，搬走会变成第二个监听器 |
+| `importWorldbooks()` | 一次导入要同时动角色库 / 世界书列表页 / 角色列表页 / 当前会话，是**跨视图编排** |
+
+### 📉 main.js 2143 → 482 行（本批 -1661）
+
+至此 `renderer/js/` 分层完成：`core ← ui ← data(13 个) ← views(26 个) ← 入口`。
+
+## 2026-09 重构第十二批：拆分角色编辑器一族
+
+> **不改任何功能** —— 431 条断言全绿、控制台 0 报错，
+> 日志 diff 仅差写操作计数 88 → 87（`persistConversations` 的防抖把两次调用
+> 并进同一个 350ms 窗口，第六批起就出现过同一现象）。
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/characterEditor.js` | 882 | 角色编辑器弹窗：基本信息 / 开场白 / 示例对话 / 宏 / 世界书作用域 |
+| `views/charAttributes.js` | 343 | 属性编辑器（面板字段的类型 / 范围 / 变化规则 / 分组）|
+| `views/characterImport.js` | 137 | 导入角色卡通道（选文件 → 导入 → 报错汇总）|
+
+### 🔁 把第六批欠的账一起结了
+
+第六批（世界书编辑器）留了个尾巴：`charEditorScope` / `editingCharacterId`
+这对状态还在入口层，注释里明写着「留到拆 `characterEditor` 那一刀一体处理」。
+本批兑现 —— 两者落进 `views/characterEditor.js`，与它们真正服务的弹窗同处一室，
+`main.js` 里已无 `charEditorScope` 的踪迹。
+
+### 🧩 这三个模块为什么能拆开（而不是像 `worldbook` 那样合并）
+
+看着 `characterEditor` 和 `charAttributes` 都在编同一份角色，像极了该合并的
+「共用容器的两块 UI」。实则不然：
+
+- **属性编辑器本身就是另一个独立弹窗**（`#char-attrs-modal`），和角色编辑器
+  是两个容器，谁也不罩着谁；
+- **导入通道**只做「读文件 → 交给编辑器」，它靠
+  `initCharacterImport({ openEditor, stashForm })` **注入**两个动作，
+  不回头 import 编辑器。
+
+判据还是第六批那句话：**共用容器的两块 UI 不能拆，不共用的就该拆。**
+
+### 📉 main.js 3342 → 2143 行（本批 -1199）
+
+## 2026-09 重构第十一批：拆分视图切换与角色列表
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/characterList.js` | 74 | 角色库列表页（卡片 / 删除 / 选择）|
+| `views/viewSwitch.js` | 55 | 页面级切换（对话 / 角色库 / 世界书）|
+| `data/persist.js` | +26 | 补上 `persistCharacters` |
+
+### 🧱 「读没读到」和「能不能写」是同一个约束的两面
+
+`persistLibrary` 在第六批已沉进 `data/persist.js`，本批把**角色**那份也挪过去，
+凑齐同一套模式 —— 理由是同一个：
+
+```js
+let worldbooksLoaded = false;                  // 「世界书读进来了吗」
+export function persistCharacters(immediate) { // 「角色能不能写」
+  const payload = { characters: characters() };
+  if (worldbooksLoaded) payload.worldbooks = worldbooks();
+  ...
+}
+```
+
+角色和世界书分开存两个文件，主进程允许一次请求同时带上两者，**但只在该带时才带** ——
+否则「存一次角色」会把 `worldbooks.json` 写空。所以标志位必须和写函数住在一起，
+留在入口层的话，角色编辑器 / 角色列表 / 导入三头又得点名它。
+
+### 📉 main.js 3440 → 3342 行（本批 -98）
+
+## 2026-09 重构第十批：拆分流式渲染三件套
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/chatImages.js` | 263 | 图片消息：缩略图 / 点开看大图 / 「配图」生成 |
+| `views/suggestionsUi.js` | 163 | 建议条 + 剧情选项（点一下当玩家回复发出去）|
+| `views/stream.js` | 99 | 流式绘制 + 自动跟随 |
+
+### 📌 `stream` 是个「只干活、不画界面」的视图
+
+它不产出 DOM，只给出 `streamPainter`（逐帧上色）/ `initStreamFollow`
+（贴底才跟随，用户往上滚就别拽回去）/ `scrollToBottom` —— 所以它没有
+`initXxx`，导出的是三个函数，被入口层和 `composer` 共用。
+
+> **视图不等于「有弹窗的模块」**：凡是一段成套行为，都可以是一个视图模块。
+
+### 📉 main.js 3867 → 3440 行（本批 -427）
+
+## 2026-09 重构第九批：抽出 chat 的四块数据地基
+
+> 这批**只动 `data/`**，一行界面代码都没搬 —— 先把地基沉好，
+> 后面拆 `chat`（第十三批）才不会到处打补丁。
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `data/messages.js` | 289 | 提示词组装：宏展开 / 示例对话解析 / 图片消息 / `buildApiMessages` |
+| `data/suggestions.js` | 167 | 剧情选项与建议：解析 / 指令拼装 / `syncConvoOptions` |
+| `data/cast.js` | 155 | 演出阵容（`convoPlayer` / `convoUserName` / `speakerName`）+ 世界书命中与召回 |
+| `data/rag.js` | 83 | 语义检索的召回与格式化（`recallSection` / `formatRagSection`）|
+
+### 🎯 判据：「两头都要用」就沉下去
+
+这四个的共同点是**界面和请求都要用**。比如 `convoUserName()`：
+消息渲染要它（显示名字），组装提示词也要它（填 `{{user}}` 宏）。
+只要留在任何一边，另一边就得反过来 import —— 所以沉到 `data/` 层。
+
+### 📉 main.js 4494 → 3867 行（本批 -627）
+
+## 2026-09 重构第八批：拆分外观弹窗
+
+### 本批拆了什么
+
+| 文件 | 行数 | 内容 |
+| --- | ---: | --- |
+| `views/appearance.js` | 214 | 对话窗口外观：白天 / 夜间的配色与气泡样式 |
+
+### 💉 注入一个，导出两个
+
+```js
+initAppearance();            // 入口层注入它需要的东西
+export function applyChatAppearance() { ... }    // 启动时按存下来的设置上色
+export function closeAppearanceModal() { ... }   // Esc 的有序关闭链要用
+```
+
+`applyChatAppearance` 和 `closeAppearanceModal` 必须导出 —— 前者要在
+`init()` 里跑一次，后者是入口层那条 Esc 链上的一环（同第七批 `closeSettings`）。
+
+### 📉 main.js 4690 → 4494 行（本批 -196）
+
 ## 2026-09 重构第七批：拆分设置弹窗
 
 > 同样**不改任何功能** —— 431 条冒烟断言全绿、控制台 0 报错，
