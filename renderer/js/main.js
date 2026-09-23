@@ -54,6 +54,21 @@ import { saveExport } from './data/export.js';
 import { reissueImportedIds } from './data/library-reissue.js';
 import { providers, providerById, ensureConvoEndpoint, currentEndpoint } from './data/providers.js';
 import {
+  userName,
+  convoPlayer,
+  convoUserName,
+  speakerName,
+  worldbookCast,
+  matchWorldbookSection
+} from './data/cast.js';
+import { applyMacros, messageImages, buildApiMessages } from './data/messages.js';
+import { recallSection } from './data/rag.js';
+import {
+  suggestInstruction,
+  parseSuggestions,
+  syncConvoOptions
+} from './data/suggestions.js';
+import {
   characters,
   characterById,
   characterForConvo,
@@ -80,8 +95,6 @@ import {
   stripPanelLines,
   syncConvoPanel,
   syncPlayerNameFromPanel,
-  OPTIONS_LABEL,
-  OPTIONS_LINE_RE,
   MAX_PANEL_FIELDS
 } from './data/panel.js';
 import {
@@ -178,30 +191,6 @@ function isCharDraft() {
   return !!charDraft && editingCharacterId === charDraft.character.id;
 }
 
-// --- 世界书 ---
-
-/**
- * 这次请求实际要注入哪些世界书。
- *
- * 规则（会话优先，且不合并）：
- *   · 会话绑了世界书（含「进入世界」）→ 只用会话的，角色自带的一律不带入。
- *     一条会话只有一个世界观，不会出现两套设定互相打架。
- *   · 会话没绑 → 才用角色自带的那几本（前提是这张卡的开关是开的）。
- *
- * 角色的开关（worldbookEnabled）关掉后，两种情况都不带入 ——
- * 这样无论单独聊天、还是被绑进某个世界当角色，这张卡都是干净的。
- */
-function effectiveWorldbookIds(convo) {
-  const convoIds = convoWorldbookIds(convo);
-  if (convoIds.length) return convoIds;
-
-  const character = characterForConvo(convo);
-  if (!character) return [];
-  if (character.worldbookEnabled === false) return [];
-
-  return Array.isArray(character.worldbookIds) ? character.worldbookIds : [];
-}
-
 /**
  * 导入进来的东西要重新发一批 id（并改写角色 → 世界书的指向）。
  * 实现搬到了 data/library-reissue.js —— 那段逻辑以前在两个导入函数里各有一份，
@@ -210,123 +199,6 @@ function effectiveWorldbookIds(convo) {
 function reissueImported(books, chars) {
   importSeq += 1;
   return reissueImportedIds(books, chars, `${Date.now().toString(36)}-${importSeq}`);
-}
-
-async function matchWorldbookSection(convo) {
-  const allIds = [...new Set(effectiveWorldbookIds(convo))];
-  if (!allIds.length) return '';
-
-  const history = convo.messages.filter(
-    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
-  );
-
-  try {
-    const result = await api.previewWorldbook({
-      worldbookIds: allIds,
-      scanDepth: WORLDBOOK_SCAN_DEPTH,
-      recursiveDepth: recursiveDepthSetting(),
-      messages: history.slice(-WORLDBOOK_SCAN_DEPTH).map((m) => ({ role: m.role, content: m.content }))
-    });
-    return (result && result.section) || '';
-  } catch (err) {
-    // 世界书匹配失败不该拦住正常聊天
-    console.error('世界书匹配失败', err);
-    return '';
-  }
-}
-
-/** {{user}} 的替换值 */
-function userName() {
-  const name = (state.settings && state.settings.userName) || '';
-  return String(name).trim() || '你';
-}
-
-/**
- * 替换角色卡里的占位符。
- * {{char}} / <BOT> 是角色自己，{{user}} / <USER> 是你。
- * 只在「发给模型」和「插入开场白」时替换，原始文本保持不动，
- * 这样以后改了名字，旧消息不会莫名其妙跟着变。
- */
-function applyMacros(text, character, name) {
-  const charName = (character && character.name) || '昔涟';
-  const me = name || userName();
-
-  // 用函数式替换：字符串形式的替换参数会把 $&、$1 之类的序列当特殊写法，
-  // 角色名里万一有 $ 就会替换错乱。
-  return String(text == null ? '' : text)
-    .replace(/\{\{char\}\}/gi, () => charName)
-    .replace(/\{\{user\}\}/gi, () => me)
-    .replace(/<BOT>/gi, () => charName)
-    .replace(/<USER>/gi, () => me);
-}
-
-/**
- * 把角色卡的「示例对话」拆成真正的 user / assistant 消息。
- * 格式是每行以 {{user}}: 或 {{char}}: 开头，多组之间用 <START> 分隔。
- * 解析不出来就返回空数组，不会影响正常对话。
- */
-function parseExampleDialogue(text, charName, me) {
-  const out = [];
-  const raw = String(text || '');
-  if (!raw.trim()) return out;
-
-  // 注意：这里的 reEsc 是「正则转义」，和上面转义 HTML 的 esc() 不是一回事，
-  // 刻意换个名字，免得以后改错。
-  const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // 名字为空时不能把「空字符串」也当成一种匹配，否则任意行都会被吃掉
-  const alternatives = (name, kind, extraTags) => {
-    const list = [`\\{\\{${kind}\\}\\}`, ...extraTags];
-    if (name && String(name).trim()) list.push(reEsc(String(name).trim()));
-    return list.join('|');
-  };
-
-  const markers = [
-    {
-      re: new RegExp(`^\\s*(?:${alternatives(me, 'user', ['<USER>'])})\\s*[:：]\\s*(.*)$`, 'i'),
-      role: 'user'
-    },
-    {
-      re: new RegExp(
-        `^\\s*(?:${alternatives(charName, 'char', ['<CHAR>', '<BOT>', '<BOT_NAME>'])})\\s*[:：]\\s*(.*)$`,
-        'i'
-      ),
-      role: 'assistant'
-    }
-  ];
-
-  let pending = null;
-
-  const flush = () => {
-    if (pending) {
-      const content = pending.lines.join('\n').trim();
-      if (content) out.push({ role: pending.role, content });
-      pending = null;
-    }
-  };
-
-  for (const line of raw.split(/\r?\n/)) {
-    // <START> 表示一组新的示例，只是分割线
-    if (/^\s*<START>\s*$/i.test(line)) {
-      flush();
-      continue;
-    }
-
-    let matched = false;
-    for (const marker of markers) {
-      const m = line.match(marker.re);
-      if (m) {
-        flush();
-        pending = { role: marker.role, lines: [m[1]] };
-        matched = true;
-        break;
-      }
-    }
-    // 没匹配到前缀就当作上一句的续行（角色说了好几行的情况很常见）
-    if (!matched && pending) pending.lines.push(line);
-  }
-
-  flush();
-  return out;
 }
 
 // 用户自己往上翻看历史时，不要被流式输出拽回底部
@@ -1587,11 +1459,6 @@ function renderAttachStrip() {
   });
 }
 
-/** 消息气泡里的图（用户发的 + 以后 AI 生成的都走这里） */
-function messageImages(message) {
-  return Array.isArray(message.images) ? message.images.filter((s) => typeof s === 'string' && s) : [];
-}
-
 function buildMessageImages(message) {
   const images = messageImages(message);
   if (!images.length) return null;
@@ -1687,254 +1554,12 @@ async function illustrateMessage(index) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  语义检索（RAG）
-//
-//  关键词匹配的死角：你写了「十二泰坦」的设定，但对话里说的是「那些神」——
-//  那条设定就永远出不来。语义检索按「意思」把相关的旧内容和设定捞回来。
-//
-//  配置是独立的一组（服务商 + 模型，走 /embeddings），和聊天、生图都不相干。
-// ---------------------------------------------------------------------------
-
-// 一次最多带几条进来。多了会挤掉真正最近的内容，而且 token 哗哗涨
-const RAG_TOP_K = 4;
-// 相似度门槛。语义检索最怕「硬凑」——不管相不相关都塞几条进来，
-// 上下文被污染了还不如不检索
-const RAG_MIN_SCORE = 0.32;
-// 拿最近几条拼查询。只用最后一条太窄（比如「嗯」这种），太多又会把主题冲淡
-const RAG_QUERY_TURNS = 3;
-
-/** 把捞回来的东西拼成注入块 */
-function formatRagSection(items, character, me) {
-  if (!items || !items.length) return '';
-
-  const lines = items.map((item) => {
-    if (item.kind === 'worldbook') {
-      return `【设定 · ${item.title || '未命名'}】\n${applyMacros(item.text, character, me)}`;
-    }
-    const who = item.role === 'user' ? me : (character && character.name) || '对方';
-    return `【早先 · ${who}】\n${applyMacros(item.text, character, me)}`;
-  });
-
-  return (
-    '[可能相关的往事]\n' +
-    '下面这些是更早的内容或设定，和现在聊的有关，可以用来保持前后一致。' +
-    '自然地用，不要直接复述：\n\n' +
-    lines.join('\n\n')
-  );
-}
-
-/** 跑一次检索，拿到可以注入的那一段（失败就返回空字符串，绝不拦着聊天） */
-async function recallSection(convo) {
-  const settings = state.settings || {};
-  if (settings.ragEnabled !== true || !settings.embeddingProviderId) return '';
-
-  const history = (convo.messages || []).filter(
-    (m) => (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim()
-  );
-  if (history.length < 2) return '';
-
-  const recent = history.slice(-RAG_QUERY_TURNS);
-  const query = recent.map((m) => String(m.content)).join('\n');
-
-  try {
-    const result = await api.ragRecall({
-      providerId: settings.embeddingProviderId,
-      model: settings.embeddingModel,
-      convoId: convo.id,
-      // 和关键词注入用同一套规则，否则两处会给出不一致的世界书范围
-      worldbookIds: effectiveWorldbookIds(convo),
-      // 最近这些本来就会进上下文，别捞回来占位置
-      recentCount: RAG_QUERY_TURNS * 2,
-      query,
-      topK: RAG_TOP_K,
-      minScore: RAG_MIN_SCORE
-    });
-
-    if (!result || result.ok !== true) {
-      console.error('语义检索失败', result && result.error);
-      return '';
-    }
-    return formatRagSection(result.items, characterForConvo(convo), convoUserName(convo));
-  } catch (err) {
-    console.error('语义检索失败', err);
-    return '';
-  }
-}
-
-// ---------------------------------------------------------------------------
-//  帮我想想：给玩家几个下一步让他挑
-//
-//  卡住不知道说什么，是长对话里最常见的体验问题。这里让模型基于当前局面
-//  给几个「玩家可以怎么接」的具体选项，点一下就当玩家的话发出去。
-//
-//  提示词刻意保持中性：只要求「贴当前局面、彼此不同、是玩家视角的动作或话」，
-//  不涉及内容尺度 —— 写成什么样由模型自己决定。
-// ---------------------------------------------------------------------------
-
-// 一次给几个选项
-const SUGGEST_COUNT = 4;
-// 单个选项的字数上限，免得点下去变成一大段
-const MAX_SUGGEST_CHARS = 120;
-// 当前建议属于哪个会话 —— 切走时要清掉
 let suggestionsConvoId = null;
-
-function suggestInstruction() {
-  return (
-    '请基于上面这段对话，替「玩家」想几个接下来可以怎么做 / 怎么说的选项。\n' +
-    '\n' +
-    '要求：\n' +
-    `1. 给 ${SUGGEST_COUNT} 个，每一个都要贴着当前局面，不要泛泛而谈。\n` +
-    '2. 每个选项要明显不同 —— 可以是不同的态度、不同的做法、或者不同的对象，\n' +
-    '   不要四个都是同一件事的不同说法。\n' +
-    '3. 用玩家第一人称，写他实际会说的话或会做的动作，\n' +
-    `   每条控制在一句话内（不超过 ${MAX_SUGGEST_CHARS} 字），不要写成小作文。\n` +
-    '4. 直接输出选项本身，不要序号、不要引号、不要解释、不要标题。\n' +
-    '5. 每行一个。'
-  );
-}
-
-/** 从模型回复里解析出选项：一行一个，容忍它带了序号或引号 */
-function parseSuggestions(text) {
-  const lines = String(text || '').split('\n');
-  const out = [];
-
-  for (const raw of lines) {
-    let line = raw.trim();
-    if (!line) continue;
-
-    // 容忍「1. 」「1、」「- 」「• 」这类前缀
-    line = line.replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '');
-    // 容忍整行被引号包起来
-    line = line.replace(/^[「『"'“”‘’]+/, '').replace(/[」』"'“”‘’]+$/, '').trim();
-
-    if (!line) continue;
-    if (line.length > MAX_SUGGEST_CHARS) line = `${line.slice(0, MAX_SUGGEST_CHARS)}…`;
-
-    if (!out.includes(line)) out.push(line);
-    if (out.length >= SUGGEST_COUNT) break;
-  }
-
-  return out;
-}
 
 function hideSuggestions() {
   el.suggestStrip.classList.add('hidden');
   el.suggestList.innerHTML = '';
   suggestionsConvoId = null;
-}
-
-// ---------------------------------------------------------------------------
-//  剧情选项（每轮由模型给出、玩家点一下就当作回复发出去）
-//
-//  和上面「帮我想想」的区别：
-//    · 帮我想想 是**额外发一次请求**，一次性给几个建议，不算常驻功能；
-//    · 剧情选项 是**面板的一部分** —— 跟状态栏一起在正文里输出，不用多发请求，
-//      每轮都更新，选项常驻在面板里。
-//
-//  选项为什么不做成普通面板字段（【剧情选项】：A / B / C）：
-//  面板字段的值是「一个字符串」，而选项是**可变长的列表**，还要逐个变成按钮。
-//  塞进字段里就得再切一次、还得处理玩家手改这种字段的边界情况，不如单独一条
-//  指令 + 单独的解析（下面这段），语义清楚也不互相干扰。
-// ---------------------------------------------------------------------------
-
-// 选项行的标记（OPTIONS_LABEL / OPTIONS_LINE_RE）在 data/panel.js 里 ——
-// 「剥掉选项行」和「剥掉状态栏行」是同一件事，两边的解析放在一起。
-// 一条选项最多多少字 —— 点下去要当消息发出去，不能变成小作文
-const MAX_OPTION_CHARS = 120;
-// 一屏最多几个（模型给多了会挤爆面板）
-const MAX_OPTIONS = 6;
-
-/** 当前会话要不要每轮出剧情选项（存在会话上，跟面板走） */
-function convoOptionsSpec(convo) {
-  const spec = convo && convo.optionsSpec;
-  if (!spec || typeof spec !== 'object') return null;
-  const count = Math.max(1, Math.min(MAX_OPTIONS, Math.round(Number(spec.count) || 3)));
-  return { count, hint: String(spec.hint || '').trim().slice(0, 200) };
-}
-
-/**
- * 从模型回复里抽选项。
- * 只认**最后一段**「【剧情选项】：」—— 模型有时会先说一遍再重写，
- * 取最后的才是最终答案。返回空数组表示这轮没给（那就保持上一轮的）。
- */
-function extractOptionsFromText(text) {
-  const lines = String(text || '').split('\n');
-  let tail = null;
-
-  for (const raw of lines) {
-    const m = raw.trim().match(OPTIONS_LINE_RE);
-    if (m) tail = m[1];
-  }
-  if (tail === null) return [];
-
-  const out = [];
-  // 只认「/」「｜」这类**明确的分隔符**。
-  // 不能拿顿号/逗号来切 —— 选项本身就是中文句子，里面天然带「，」，
-  // 一切就把「我想先喝一杯，压压惊」拆成两条没头没尾的碎片（实测踩过）。
-  for (const piece of tail.split(/[\/｜|]/)) {
-    let item = piece.trim();
-    if (!item) continue;
-    // 容忍「1. 」「① 」「- 」这类前缀和包在引号里
-    item = item.replace(/^[-*•·]\s*/, '').replace(/^\d+\s*[.、)）:：]\s*/, '').replace(/^[①-⑳]\s*/, '');
-    item = item.replace(/^[「『"'“”‘’]+/, '').replace(/[」』"'“”‘’]+$/, '').trim();
-    if (!item) continue;
-    if (item.length > MAX_OPTION_CHARS) item = `${item.slice(0, MAX_OPTION_CHARS)}…`;
-    if (!out.includes(item)) out.push(item);
-    if (out.length >= MAX_OPTIONS) break;
-  }
-
-  return out;
-}
-
-/** 注入给模型的选项指令（有配置时才注入） */
-function optionsInstruction(convo) {
-  const spec = convoOptionsSpec(convo);
-  if (!spec) return '';
-
-  const lines = [
-    '【剧情选项】',
-    `在正文和状态栏之后，另起一行，用「${OPTIONS_LABEL}：A / B / C」的格式给出 ${spec.count} 个选项，` +
-      '每个选项之间用「 / 」隔开（就这一行，不要编号、不要再分多行）。',
-    '每个选项是玩家接下来可以**直接说出口或做出来**的动作/台词，用玩家第一人称，' +
-      `每条一句话以内（不超过 ${MAX_OPTION_CHARS} 字）。`,
-    '选项之间要明显不同（不同的态度、做法或对象），不要是同一件事的不同说法。'
-  ];
-  if (spec.hint) lines.push(`额外要求：${spec.hint}`);
-  return lines.join('\n');
-}
-
-/**
- * 把最近一条带选项的回复里的选项同步到会话上。
- *
- * 规则：
- *   · 找到**最近**一条提到选项的助手消息就用它 —— 和状态栏一样「最新一轮说了算」；
- *   · 一条都没有就清空（这轮没给，就别把上一轮的旧选项留在面板上误导玩家）；
- *   · 没开剧情选项的会话直接清空并返回。
- * 返回是否发生了变化。
- */
-function syncConvoOptions(convo) {
-  if (!convo || !Array.isArray(convo.messages)) return false;
-
-  const before = JSON.stringify(convo.options || []);
-  let found = null;
-
-  if (convoOptionsSpec(convo)) {
-    for (let i = convo.messages.length - 1; i >= 0; i -= 1) {
-      const msg = convo.messages[i];
-      if (!msg || msg.role !== 'assistant') continue;
-      const content = String(msg.content || '');
-      if (!content.includes(OPTIONS_LABEL)) continue;
-      const items = extractOptionsFromText(content);
-      if (items.length) {
-        found = items;
-        break;
-      }
-    }
-  }
-
-  convo.options = found || [];
-  return before !== JSON.stringify(convo.options);
 }
 
 /** 玩家点了某个剧情选项：当作他说了这句话发出去 */
@@ -2053,183 +1678,6 @@ async function suggestNextActions(trigger) {
 // ---------------------------------------------------------------------------
 //  发送与流式接收
 // ---------------------------------------------------------------------------
-
-/**
- * 组装真正发给模型的消息数组。
- *
- * 顺序（和酒馆的思路一致）：
- *   1. system：人设 + 扮演规则/GM 规则 + 角色设定/性格/场景 + 叙述模式 + 日期
- *   2. 世界书命中的设定
- *   3. 角色卡里的示例对话（当成已经发生过的对话塞进去）
- *   4. 最近 N 轮真实对话（面板行已剥掉）
- *   5. 面板状态（当前权威值）
- *   6. 角色卡里的「对话后指令」，放最后最管用
- *
- * 绑定了角色卡时不再使用「设置」里的全局人设 —— 否则你扮演雷电将军，
- * 系统提示词却在说「你是昔涟」，模型会精神分裂。
- */
-function buildApiMessages(convo, worldbookSection, ragSection) {
-  const settings = state.settings || {};
-  const character = characterForConvo(convo);
-  // 进了世界的会话用玩家自己创建的角色名，其它会话用设置里的名字
-  const me = convoUserName(convo);
-  const charName = (character && character.name) || '昔涟';
-  const gmMode = isGmMode(convo);
-
-  // 注意：调用时对话末尾通常刚 push 了一条空的 assistant 占位消息（用来填空），
-  // 必须把它过滤掉，否则会发给接口一条 content 为空的消息，严格的接口会直接报 400。
-  // 但**只带图不打字**的用户消息要留下 —— 它没有文字却是有内容的。
-  const history = convo.messages.filter(
-    (m) =>
-      (m.role === 'user' || m.role === 'assistant') &&
-      (String(m.content || '').trim() || messageImages(m).length)
-  );
-
-  const turns = Math.max(1, Number(settings.maxTurns) || CONFIG.MAX_TURNS);
-  // 从摘要覆盖点开始取「最近 N 轮」。
-  // 如果还按 slice(-turns*2) 取，会出现「摘要写到第 30 条，原文只发第 70 条起」的断层 ——
-  // 中间那段模型两边都看不到。从覆盖点往后、按轮数取，上下文才是连续的。
-  const covered = summarizedCount(convo);
-  const uncovered = covered > 0 ? history.slice(covered) : history;
-  const recent = uncovered.slice(-turns * 2);
-
-  const messages = [];
-
-  // ---- 1. 系统提示词 ----
-  const parts = [];
-
-  // 全局人设只在「通用助手」时才用：
-  //   · 绑了角色卡 → 用卡自己的 systemPrompt
-  //   · GM 模式（从世界书列表页进来的会话）→ 叙述者不该顶着某个人的人设。
-  //     以前这里无条件用全局人设，于是提示词里同时有「你是昔涟」和
-  //     「你是这个世界的叙述者」，模型会去扮演昔涟 —— 世界就这么被一个人盖住了。
-  const globalPersona = !character && !gmMode ? settings.systemPrompt || '' : '';
-  const base = character ? character.systemPrompt || '' : globalPersona;
-  if (String(base).trim()) parts.push(applyMacros(base, character, me).trim());
-
-  if (character) {
-    // 身份：年龄/性别/种族是「这个人是谁」的一部分，一开始就得说清楚。
-    // 光靠状态面板不够 —— 面板可能被重置、老会话也没有这些字段，
-    // 模型不知道就只能自己编（实测：16 岁的角色被回复成 21 岁）。
-    const identity = [];
-    if (character.age) identity.push(`年龄 ${character.age}`);
-    if (character.gender) identity.push(`性别 ${character.gender}`);
-    if (character.race) identity.push(`种族 ${character.race}`);
-    if (identity.length) parts.push(`【${charName}的基本信息】\n${identity.join('，')}`);
-
-    if (character.description) parts.push(`【${charName}的设定】\n${applyMacros(character.description, character, me)}`);
-    if (character.personality) parts.push(`【${charName}的性格】\n${applyMacros(character.personality, character, me)}`);
-    if (character.scenario) parts.push(`【当前场景】\n${applyMacros(character.scenario, character, me)}`);
-  }
-
-  // GM 模式换掉那段「不要跳出角色」：世界模型必须能写第三人称、切多个 NPC 视角，
-  // 被「始终以第一人称」捆着会一轮缩回单角色腔调。
-  // 两种规则里都带上了「推进节奏」—— 否则模型会一口气把整场戏演完，玩家只剩看的份。
-  const ruleText = gmMode ? gmRuleText(charName, me, convo) : roleplayRuleText(charName, me, convo);
-  if (character || gmMode) parts.push(ruleText);
-
-  // 玩家角色：从世界书列表页「游玩」进来的会话才有这段。
-  // 只有名字的话上面那句规则已经交代了，所以这里只在写了设定时才注入。
-  const player = convoPlayer(convo);
-  if (player && player.profile) {
-    parts.push(`【玩家角色：${player.name || me}】\n${player.profile}`);
-  }
-
-  // 这个世界有哪些 NPC：不列出来 GM 就只能现编
-  const cast = worldbookCast(convo);
-  if (cast) parts.push(cast);
-
-  // 叙述模式：决定要不要写心理 / 旁白，以及用什么标记（标记对上渲染样式）
-  const narration = narrationInstruction(convo);
-  if (narration) parts.push(narration);
-
-  if (settings.showDate !== false) {
-    const today = new Date().toLocaleDateString('zh-CN', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'long'
-    });
-    parts.push(`[参考信息] 今天是 ${today}。`);
-  }
-
-  if (parts.length) messages.push({ role: 'system', content: parts.join('\n\n') });
-
-  // ---- 2. 世界书：命中的设定紧跟人设之后 ----
-  // 放在角色定义后面（酒馆叫 After Char Defs）——比角色本身靠前会稀释人设，
-  // 比对话历史靠后又容易被忽略，这里是比较稳的位置。
-  if (String(worldbookSection || '').trim()) {
-    messages.push({ role: 'system', content: String(worldbookSection).trim() });
-  }
-
-  // ---- 2.2 语义检索捞回来的往事 / 设定 ----
-  // 紧跟在世界书后面：都是「参考背景」，而且都是可选的（捞不到就什么都不加）
-  if (String(ragSection || '').trim()) {
-    messages.push({ role: 'system', content: String(ragSection).trim() });
-  }
-
-  // ---- 2.5 前面的剧情：较早对话的摘要 ----
-  // 放在对话历史之前、示例对话之后的位置，让模型先读背景再读最近对话。
-  const summaryText = formatSummaryForPrompt(convo);
-  if (summaryText) messages.push({ role: 'system', content: summaryText });
-
-  // ---- 3. 示例对话 ----
-  // 注意：parseExampleDialogue 只剥掉了行首的「{{user}}:」前缀，
-  // 正文里的宏还得自己替换一遍，否则模型会读到字面的 {{user}}。
-  // GM 模式不注入示例对话：那是「某个角色怎么说话」的样本，
-  // 而这里要的是主持人腔调，塞进去反而把模型的视角拉回单角色。
-  if (character && !gmMode) {
-    for (const example of parseExampleDialogue(character.mesExample, charName, me)) {
-      messages.push({
-        role: example.role,
-        content: applyMacros(example.content, character, me)
-      });
-    }
-  }
-
-  // ---- 4. 真实对话历史（剥掉面板行，面板由程序权威注入）----
-  // 用本会话的已知字段名来剥：正文里提到同名字样不会被误删。
-  const panelFields = convoPanelFields(convo);
-  for (const m of recent) {
-    const raw = applyMacros(m.content, character, me);
-    const text = m.role === 'assistant' ? cleanAssistantText(raw, panelFields) : raw;
-    const images = messageImages(m);
-
-    // 带图的用户消息要发成多模态数组 —— 这是 OpenAI 那套的通用写法，
-    // 别的家（Claude / Gemini 的兼容层）一般也认。
-    if (images.length && m.role === 'user') {
-      const parts = [];
-      // 有的接口不接受空 text 段，所以只有真有字才加
-      if (String(text).trim()) parts.push({ type: 'text', text });
-      for (const url of images) parts.push({ type: 'image_url', image_url: { url } });
-      messages.push({ role: 'user', content: parts });
-      continue;
-    }
-
-    messages.push({ role: m.role, content: text });
-  }
-
-  // ---- 5. 面板状态：紧贴对话历史之后，权重很高 ----
-  // 放在这里而不是塞进历史，是因为历史会被 maxTurns 截断 ——
-  // 面板一旦被截出去，模型就开始凭感觉编数值。
-  const panelText = formatPanelForPrompt(convo);
-  if (panelText) messages.push({ role: 'system', content: panelText });
-
-  // ---- 5b. 剧情选项：和面板同一批（都是「这轮要维护的状态」）----
-  // 只在这张卡/这个会话开了剧情选项时才注入。
-  const optionsText = optionsInstruction(convo);
-  if (optionsText) messages.push({ role: 'system', content: optionsText });
-
-  // ---- 6. 对话后指令 ----
-  if (character && String(character.postHistoryInstructions || '').trim()) {
-    messages.push({
-      role: 'system',
-      content: applyMacros(character.postHistoryInstructions, character, me).trim()
-    });
-  }
-
-  return messages;
-}
 
 function setStreaming(on) {
   state.streaming = on;
@@ -3183,81 +2631,6 @@ async function generateWorldOpening(convo, book) {
     openingBusyId = null;
     if (activeConvo() === convo) renderMessages({ forceScroll: true });
   }
-}
-
-/** 玩家在这个世界里的角色（老的会话没有这个字段） */
-function convoPlayer(convo) {
-  const p = convo && convo.player;
-  if (!p || typeof p !== 'object') return null;
-  const name = String(p.name || '').trim();
-  const profile = String(p.profile || '').trim();
-  if (!name && !profile) return null;
-  return { name, profile };
-}
-
-/** {{user}} 的替换值：进了世界的会话用玩家角色的名字，其它会话用设置里的名字 */
-function convoUserName(convo) {
-  const player = convoPlayer(convo);
-  return player && player.name ? player.name : userName();
-}
-
-/**
- * 助手那一侧显示成谁：
- *   · 绑了角色卡 → 角色名
- *   · 进了世界 → 世界名（那个世界里的所有 NPC 都算它说的）
- *   · 都没有 → 通用助手，用全局人设那个名字
- */
-function speakerName(convo) {
-  const character = characterForConvo(convo);
-  if (character) return character.name;
-
-  const book = convoWorldbookIds(convo)
-    .map((id) => worldbookById(id))
-    .find(Boolean);
-  if (book) return book.name;
-
-  return '昔涟';
-}
-
-// 名单太长会吃掉上下文，给个总预算；单个 NPC 的描述也截一下
-const MAX_CAST_CHARS = 3000;
-const MAX_CAST_PER_NPC = 160;
-
-/**
- * 「这个世界的人」：把书里的角色副本列给 GM。
- *
- * 不列的话 GM 根本不知道这个世界有哪些 NPC —— 之前就是这样，它只能现编人物，
- * 或者等你主动提到名字。名单每轮都注入，所以做了长度上限。
- */
-function worldbookCast(convo) {
-  const books = convoWorldbookIds(convo)
-    .map((id) => worldbookById(id))
-    .filter(Boolean);
-  const cast = books.flatMap((b) => worldbookCharacters(b));
-  if (!cast.length) return '';
-
-  const lines = [];
-  let total = 0;
-
-  for (const c of cast) {
-    // 身份用括号缀在名字后面：GM 不知道 NPC 几岁、什么族，照样会瞎编
-    const who = [c.age && `${c.age}岁`, c.gender, c.race].filter(Boolean).join('·');
-    const bits = [c.description, c.personality]
-      .map((s) => String(s || '').trim().replace(/\s+/g, ' '))
-      .filter(Boolean)
-      .join(' ');
-    const head = who ? `${c.name}（${who}）` : c.name;
-    const line = `- ${head}：${bits.slice(0, MAX_CAST_PER_NPC) || '（没写设定）'}`;
-
-    if (total + line.length > MAX_CAST_CHARS) {
-      lines.push(`- （还有 ${cast.length - lines.length} 人没列出）`);
-      break;
-    }
-    lines.push(line);
-    total += line.length;
-  }
-
-  return `【这个世界的人】\n以下角色由你扮演，各自有各自的立场、语气和说话习惯。\n${lines.join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------
