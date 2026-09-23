@@ -987,16 +987,6 @@ body {
   50% { opacity: 0.62; }
 }
 
-/* 设置里的多行帮助文字（语义检索那段比较长） */
-.field-help code {
-  padding: 0 4px;
-  border-radius: 4px;
-  background: var(--code-bg);
-  color: var(--code-text);
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-}
-
 #input {
   flex: 1 1 auto;
   border: none;
@@ -1933,11 +1923,6 @@ body {
 .field-grid input[type="number"] { font-variant-numeric: tabular-nums; }
 
 /* 输入框后面跟一个按钮：拉伸对齐，两者上下边缘齐平 */
-.input-group { display: flex; gap: 8px; align-items: stretch; }
-.input-group > input { flex: 1 1 auto; min-width: 0; }
-.input-group > .btn { flex: 0 0 auto; white-space: nowrap; }
-
-/* 兼容旧写法：以前用 .row 包输入框 + 按钮 */
 .row { display: flex; gap: 8px; align-items: stretch; }
 .row .btn { flex: 0 0 auto; }
 

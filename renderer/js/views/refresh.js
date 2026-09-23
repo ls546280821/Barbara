@@ -37,8 +37,3 @@ export function refreshAll(opts) {
     }
   }
 }
-
-/** 现在登记了几个（冒烟测试用） */
-export function refreshListenerCount() {
-  return listeners.size;
-}
