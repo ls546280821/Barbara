@@ -1,5 +1,52 @@
 # Barbara（原 Cyrene）优化更新日志
 
+## 2026-09 重构第二批：views 开始拆（先补地基）
+
+> 同样**不改任何功能** —— 431 条冒烟断言全绿，控制台 0 报错。
+> 进度在 **[重构方案.md](重构方案.md)** §六。
+
+### 📚 先补了地基层：`data/library.js`
+
+动手拆第一个视图时才发现「`player` 依赖最少」这个判断站不住 —— 它要 9 个还住在
+`main.js` 里的函数，其中 6 个是角色库 / 世界书的读取器：
+
+`characters` / `characterById` / `worldbooks` / `worldbookById` /
+`worldbookCharacters` / `characterAttrs`
+
+都只有 1~3 行，依赖只有 `state` 和那份共享归一化，所以是纯粹的剪过去加 `export`。
+**它们是共享数据层**（界面拿它填列表、组装提示词拿它取设定）；不先抽出来，
+每个视图模块都得把这批读取器一个个注入进来，拆到第三个就开始重复。
+
+### 🎭 拆出 `views/player.js`（进入世界的玩家角色弹窗）
+
+搬走的是弹窗本身：填名字、挑一张角色卡当自己、下拉预览、开关弹窗。
+`playingBookId`（弹窗正对着哪本书）跟着走了，`main.js` 用 `getPlayingBook()` 取目标。
+
+**没搬 `startWorldPlay` / `generateWorldOpening`**，这是刻意的：它们要调
+`createConvo` / `seedIdentity` / `seedPanelFromCharacters` / `applyMacros` /
+`showView` / `worldbookCast` / `renderMessages` —— 其中 `renderMessages` 是聊天视图的
+函数，views 层调它等于两个视图互相 import（违反「依赖方向只能向下」）。
+**归位顺序**：先让 `createConvo` → `data/conversations.js`、`seed*` → `data/panel.js`，
+再搬这两个动作。
+
+弹窗**不登记刷新总线** —— 它是「打开时按需重画」，不参与全局重绘。
+
+### 📉 规模
+
+| | 之前 | 现在 |
+| --- | ---: | ---: |
+| `renderer/js/main.js` | 7169 | **7037** |
+| `renderer/js/data/` | 6 个文件 | 7 个（+ `library.js`）|
+| `renderer/js/views/` | 1 个文件 | 2 个（+ `player.js`）|
+
+### ⚠️ 踩到一个坑：并行改同一个文件，只有一处能落盘
+
+一次发多个编辑到**同一个文件**时，只有一个能生效，其余的静默丢失 ——
+每次调用都会回报「成功」。这次的症状是冒烟测试报
+`ReferenceError: closePlayerModal is not defined`：加 `import` 的那次编辑
+被同批的另一次覆盖了。
+**同一个文件的改动要一条一条发**（改不同文件时并行没问题）。
+
 ## 2026-09 重构第一批：抽 data 层 + 刷新总线
 
 > 这一步**不改任何功能**，界面行为一个字节都没变 —— 431 条冒烟断言全绿。
