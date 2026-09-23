@@ -4,6 +4,9 @@
 //  data/persist.js —— 把内存里的数据写回磁盘
 //  会话是防抖保存；角色库 / 世界书是两个文件，但主进程允许一次写入带上两者，
 //  所以走 persistLibrary() 一起落盘。
+//
+//  三个入口都在写角色库（角色编辑器、世界书编辑器里的副本、两条导入链路），
+//  所以 persistCharacters / persistLibrary 沉在这儿，谁都不用认识谁。
 // ============================================================================
 
 import { api } from '../core/api.js';
@@ -45,6 +48,29 @@ export function markWorldbooksLoaded() {
 /** 世界书是否已经读进来了（「存角色时要不要捎上 worldbooks」靠它判断） */
 export function areWorldbooksLoaded() {
   return worldbooksLoaded;
+}
+
+/**
+ * 把当前角色库写回磁盘。
+ *
+ * 角色和世界书分开存两个文件，主进程允许一次请求同时带上 worldbooks；
+ * 但只在世界书确实读进来了时才带 —— 否则「存一次角色」会把 worldbooks.json 写空。
+ *
+ * immediate = true 时立刻写、不等下一帧（关闭窗口前那种必须落地的场景）。
+ */
+export function persistCharacters(immediate) {
+  const payload = { characters: characters() };
+  if (worldbooksLoaded) payload.worldbooks = worldbooks();
+
+  if (immediate) {
+    api.saveCharactersNow(payload);
+    return Promise.resolve(payload);
+  }
+
+  return api.saveCharacters(payload).catch((err) => {
+    console.error('保存角色失败', err);
+    showToast('角色没能保存到磁盘，请检查磁盘空间', 'error');
+  });
 }
 
 /**

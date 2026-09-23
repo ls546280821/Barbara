@@ -49,7 +49,7 @@ import { applyTheme, toggleTheme } from './ui/theme.js';
 import { esc, renderMarkdown } from './ui/markdown.js';
 import { h, button, card, clear, renderListPage } from './ui/build.js';
 
-import { persistConversations, persistLibrary, markWorldbooksLoaded, areWorldbooksLoaded } from './data/persist.js';
+import { persistConversations, persistLibrary, persistCharacters, markWorldbooksLoaded } from './data/persist.js';
 import { saveExport } from './data/export.js';
 import { reissueImportedIds } from './data/library-reissue.js';
 import { providers, providerById, ensureConvoEndpoint, currentEndpoint } from './data/providers.js';
@@ -145,6 +145,8 @@ import {
   clearPendingImages
 } from './views/chatImages.js';
 import { initSuggestionsUi, pickOption, dropSuggestionsIfConvoChanged, suggestNextActions } from './views/suggestionsUi.js';
+import { showView, refreshLibraryPage, initViewSwitch } from './views/viewSwitch.js';
+import { initCharacterList, renderCharacterPage } from './views/characterList.js';
 import {
   initWorldbook,
   editWorldbookFromPage,
@@ -681,12 +683,6 @@ function renderAll(options) {
   dropSuggestionsIfConvoChanged();
 
   refreshAll(options);
-}
-
-/** 停在图书区那两个列表页时也要跟着刷新（改名、删除、导入都会走到这里） */
-function refreshLibraryPage() {
-  if (currentView === 'chars') renderCharacterPage();
-  else if (currentView === 'worldbooks') renderWorldbookPage();
 }
 
 /**
@@ -1746,8 +1742,6 @@ function bindEvents() {
   // 右上角切换模型
   el.modelSwitch.addEventListener('change', () => applyModelChoice(el.modelSwitch.value));
 
-  // 角色库 → 切到角色列表页
-  el.btnChars.addEventListener('click', () => showView('chars'));
   el.btnCloseChars.addEventListener('click', closeCharsModal);
   el.btnNewChar.addEventListener('click', newCharacter);
   el.btnSaveChar.addEventListener('click', saveCharacter);
@@ -1801,9 +1795,6 @@ function bindEvents() {
   // 这里只留「手动压一段」—— 它要改头部的「正在整理记忆…」提示，
   // 等 header 独立成模块之后再让它归位。
   el.btnSummarizeNow.addEventListener('click', summarizeNow);
-
-  // 世界书 → 切到世界书列表页
-  el.btnWorldbooks.addEventListener('click', () => showView('worldbooks'));
 
   // 进入世界前创建玩家角色
   el.btnClosePlayer.addEventListener('click', closePlayerModal);
@@ -1924,23 +1915,6 @@ function bindEvents() {
 //  角色库
 // ---------------------------------------------------------------------------
 
-function persistCharacters(immediate) {
-  // 角色和世界书分开存两个文件，主进程允许一次请求同时带上 worldbooks；
-  // 但只在世界书确实读进来了时才带 —— 否则「存一次角色」会把 worldbooks.json 写空。
-  const payload = { characters: characters() };
-  if (areWorldbooksLoaded()) payload.worldbooks = worldbooks();
-
-  if (immediate) {
-    api.saveCharactersNow(payload);
-    return Promise.resolve(payload);
-  }
-
-  return api.saveCharacters(payload).catch((err) => {
-    console.error('保存角色失败', err);
-    showToast('角色没能保存到磁盘，请检查磁盘空间', 'error');
-  });
-}
-
 function openCharsModal() {
   // 弹窗现在只是「编辑某一个角色」的表单，没有列表了。
   // 谁打开它谁负责先设好 editingCharacterId / charEditorScope。
@@ -2028,33 +2002,6 @@ function showCharForm(show) {
   el.btnDelChar.disabled = !show || isCharDraft();
   el.btnSaveChar.disabled = !show;
   if (!show) el.charFootHint.textContent = charFootHintText(null);
-}
-
-// ---------------------------------------------------------------------------
-//  主区域的视图切换
-//  以前整个 main 只有聊天一屏，所有功能都靠弹窗盖在上面；
-//  角色库变成页面之后就需要这一层了。
-// ---------------------------------------------------------------------------
-
-/** 当前主区域显示的是哪个视图：'chat' 聊天 / 'chars' 角色列表 / 'worldbooks' 世界书列表 */
-let currentView = 'chat';
-
-const VIEWS = ['chat', 'chars', 'worldbooks'];
-
-function showView(name) {
-  if (!VIEWS.includes(name)) return;
-  currentView = name;
-
-  el.viewChat.classList.toggle('hidden', name !== 'chat');
-  el.viewChars.classList.toggle('hidden', name !== 'chars');
-  el.viewWorldbooks.classList.toggle('hidden', name !== 'worldbooks');
-  // 侧边栏那一项高亮，让人知道自己在哪个页面
-  el.btnChars.classList.toggle('active', name === 'chars');
-  el.btnWorldbooks.classList.toggle('active', name === 'worldbooks');
-
-  if (name === 'chars') renderCharacterPage();
-  else if (name === 'worldbooks') renderWorldbookPage();
-  else el.input.focus();
 }
 
 // ---------------------------------------------------------------------------
@@ -2191,60 +2138,6 @@ async function generateWorldOpening(convo, book) {
     openingBusyId = null;
     if (activeConvo() === convo) renderMessages({ forceScroll: true });
   }
-}
-
-// ---------------------------------------------------------------------------
-//  角色列表页
-//  这份列表以前塞在编辑弹窗的左栏里，弹窗一关就看不见角色有哪些。
-//  现在它是主区域里的一个独立页面，每张卡直接给「编辑」和「聊天」两个入口。
-// ---------------------------------------------------------------------------
-
-function renderCharacterPage() {
-  const list = characters();
-  renderListPage({
-    grid: el.charPageGrid,
-    empty: el.charPageEmpty,
-    sub: el.charsPageSub,
-    subText: list.length
-      ? `共 ${list.length} 个角色 · 点「聊天」直接开一个新会话`
-      : '导入酒馆角色卡，或自己写一个',
-    items: list,
-    card: characterCard
-  });
-}
-
-/** 一张角色卡：头像 + 名字 + 来源 + 编辑/聊天，右上角悬停浮出删除 */
-function characterCard(c) {
-  // 来源 + 分类标签挤在同一行：卡片高度不变，标签也不会把卡片撑得参差不齐。
-  // 标签是「这张卡属于什么类型」（作品/风格/用途），只显示前几个，多了省略。
-  const subBits = [c.source === 'png' ? '酒馆角色卡' : c.source === 'json' ? 'JSON 角色卡' : '手写'];
-  for (const tag of (Array.isArray(c.tags) ? c.tags : []).slice(0, 3)) {
-    if (String(tag).trim()) subBits.push(String(tag).trim());
-  }
-  const subText = subBits.join(' · ');
-
-  return card({
-    title: c.name,
-    sub: subText,
-    avatar: c.avatar,
-    avatarText: c.name.slice(0, 1),
-    // 删除：静止时是透明的，鼠标移上来才浮出来 —— 跟左侧会话列表的 × 同一套。
-    // 这样卡片平时还是干净的「编辑 / 聊天」两个按钮，不至于误点。
-    extra: button({
-      class: 'char-card-del',
-      text: '×',
-      title: '删除这个角色',
-      ariaLabel: `删除角色：${c.name}`,
-      onClick: (event) => {
-        event.stopPropagation();
-        deleteCharacterById(c.id, 'library');
-      }
-    }),
-    actions: [
-      button({ class: 'btn btn-ghost btn-sm', text: '编辑', onClick: () => editCharacterFromPage(c.id) }),
-      button({ class: 'btn btn-primary btn-sm', text: '聊天', onClick: () => chatWithCharacter(c.id) })
-    ]
-  });
 }
 
 /** 点「编辑」：用编辑弹窗打开这个角色（弹窗现在只是表单） */
@@ -3351,6 +3244,15 @@ async function init() {
   initSuggestionsUi({
     send: sendMessage,
     growInput: autoGrowInput
+  });
+  // 侧边栏的「角色库 / 世界书」两个入口自己绑（切屏是 viewSwitch 自己的事）。
+  initViewSwitch();
+  // 角色卡上的三个按钮都跨分区（编辑要开编辑器、聊天要建会话并切屏、删除要解绑会话），
+  // 所以由这里把动作交给列表页。
+  initCharacterList({
+    edit: editCharacterFromPage,
+    chat: chatWithCharacter,
+    remove: deleteCharacterById
   });
   // 世界书编辑器同理。它要切「角色编辑器作用域」再打开角色编辑器弹窗 ——
   // 那是跨视图编排，所以那几个动作由这里注入进去（视图不向上 import）。
