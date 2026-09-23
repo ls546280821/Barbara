@@ -65,12 +65,14 @@ import {
   convoPanelDefs,
   convoPanelFields,
   formatPanelForPrompt,
-  mergeMeterValue,
   normalizePanelDefs,
   panelFieldAllowed,
+  seedIdentity,
+  seedPanelFromCharacters,
   setPanelField,
   stripPanelLines,
   syncConvoPanel,
+  syncPlayerNameFromPanel,
   OPTIONS_LABEL,
   OPTIONS_LINE_RE,
   MAX_PANEL_FIELDS
@@ -5899,123 +5901,6 @@ function addCharAttr(rawName) {
 
   charAttrs.push({ name, value: '' });
   renderCharAttrs();
-}
-
-/**
- * 往状态面板里补字段。已存在的跳过（同名的保留面板里的当前值 ——
- * 半路给会话绑角色，不该把这一局已经跑出来的数值冲掉），
- * 初始值只在「这个字段是刚种进去的」时候落地。
- *
- * pairs 的元素可以是 [name, value]，也可以是完整定义对象
- * {name, value, type, min, max, hint} —— 后者会把范围/hint 一起记到
- * convo.panelDefs 上，之后注入提示词时告诉模型（见 formatPanelForPrompt）。
- */
-function appendPanelFields(convo, pairs) {
-  if (!convo || !pairs.length) return false;
-
-  const fields = [...convoPanelFields(convo)];
-  const panel = { ...convoPanel(convo) };
-  const defs = { ...convoPanelDefs(convo) };
-  const known = new Set(fields);
-  let changed = false;
-
-  for (const pair of pairs) {
-    // 两种形状都收：[name, value] 和完整定义对象
-    const raw = Array.isArray(pair) ? { name: pair[0], value: pair[1] } : pair || {};
-    const name = String(raw.name == null ? '' : raw.name).trim();
-    if (!name || known.has(name)) continue;
-    if (!panelFieldAllowed(name)) continue;
-    if (fields.length >= MAX_PANEL_FIELDS) break;
-
-    fields.push(name);
-    known.add(name);
-    changed = true;
-
-    // 归一化一遍：范围写反了会被换正，类型不认识会退回 text
-    const def = normalizePanelField({ ...raw, name });
-    if (!def) continue;
-
-    // 范围/hint/分组记到会话上（只有真的有内容才记，免得存一堆空壳）
-    if (def.type !== 'text' || def.hint || def.group) {
-      defs[name] = {
-        type: def.type,
-        ...(typeof def.min === 'number' ? { min: def.min } : {}),
-        ...(typeof def.max === 'number' ? { max: def.max } : {}),
-        ...(def.hint ? { hint: def.hint } : {}),
-        ...(def.group ? { group: def.group } : {})
-      };
-    }
-
-    // 初始值也过一遍范围（卡作者自己写越界了，也一样夹回来），
-    // 并统一成「分子/满值」格式（卡里 initial 常是裸数字 20）
-    const text = String(def.value == null ? '' : def.value).trim();
-    if (text) panel[name] = clampFieldValue(mergeMeterValue(text, '', def), def).value.slice(0, 500);
-  }
-
-  if (!changed) return false;
-
-  convo.panelFields = fields;
-  convo.panel = panel;
-  convo.panelDefs = defs;
-  convo.updatedAt = now();
-  return true;
-}
-
-/** 把角色卡上的「属性」种进会话的状态面板（连类型/范围/hint 一起） */
-function seedPanelFromCharacters(convo, list) {
-  if (!convo || !Array.isArray(list)) return false;
-
-  const pairs = [];
-  for (const character of list) {
-    for (const attr of characterAttrs(character)) pairs.push(attr);
-  }
-  return appendPanelFields(convo, pairs);
-}
-
-/**
- * 把「身份四项」（姓名 / 年龄 / 性别 / 种族）种进状态面板。
- *
- * 两处都用它，但「这是谁的身份」不一样：
- *   · 单角色对话：是你绑的那张卡的身份（姓名 = 角色名）。模型不知道就只能瞎编 ——
- *     实测 16 岁的角色被回复成 21 岁。
- *   · 游玩世界书：是「你自己」的身份（姓名 = 你在弹窗里填的名字，其余来自选的卡）。
- *
- * 为什么身份也要进面板：世界里时间会走、剧情会推 —— 过一年年龄要涨一岁，
- * 被人改了名字也得跟着改。交给「每轮由程序权威注入」的面板维护，
- * 比让模型自己记牢靠得多。
- */
-function seedIdentity(convo, name, character) {
-  const pairs = [];
-  const trimmed = String(name || '').trim();
-  if (trimmed) pairs.push(['姓名', trimmed]);
-
-  if (character) {
-    const age = String(character.age || '').trim();
-    const gender = String(character.gender || '').trim();
-    const race = String(character.race || '').trim();
-    if (age) pairs.push(['年龄', age]);
-    if (gender) pairs.push(['性别', gender]);
-    if (race) pairs.push(['种族', race]);
-  }
-
-  return appendPanelFields(convo, pairs);
-}
-
-/**
- * 面板里的「姓名」被剧情改了 → 跟着改会话上的玩家名。
- * 不跟着改就会出现「面板说你叫 A，消息标签和 {{user}} 还叫你 B」的矛盾。
- * 只对进了世界的会话生效（普通角色扮演没有「玩家角色」这一说）。
- */
-function syncPlayerNameFromPanel(convo) {
-  const player = convo && convo.player;
-  if (!player || typeof player !== 'object') return false;
-
-  const name = String(convoPanel(convo)['姓名'] || '').trim();
-  if (!name || name === player.name) return false;
-
-  player.name = name.slice(0, 40);
-  convo.updatedAt = now();
-  return true;
 }
 
 /** 把表单里的内容写回内存里的角色对象（切走或保存前调用） */
