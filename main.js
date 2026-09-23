@@ -202,7 +202,12 @@ function writeJsonNow(file, data) {
       fs.copyFileSync(file, backupFile);
     }
 
-    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    // 原子写：先写临时文件再 rename —— 写入中途崩溃/断电时，
+    // 主文件要么是旧的完整内容，要么是新的完整内容，不会出现写了一半的截断文件。
+    // （Node 的 rename 在 Windows 上也是替换语义，目标已存在也能盖。）
+    const tmpFile = file + '.tmp';
+    fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmpFile, file);
     return true;
   } catch (err) {
     console.error('[store] 写入失败:', file, err.message);
