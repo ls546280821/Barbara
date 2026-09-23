@@ -8,7 +8,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "smoke": "electron tools/smoke-test.js"
+    "smoke": "electron tools/smoke-test.js",
+    "diag": "electron tools/diag-page.js"
   },
   "devDependencies": {
     "electron": "^44.4.3"
